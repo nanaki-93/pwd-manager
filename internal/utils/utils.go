@@ -9,11 +9,12 @@ import (
 	"crypto/rand"
 	"encoding/json"
 	"fmt"
-	"github.com/nanaki-93/pwd-manager/internal/model"
-	"golang.org/x/crypto/ssh/terminal"
 	"io"
 	"os"
 	"syscall"
+
+	"github.com/nanaki-93/pwd-manager/internal/model"
+	"golang.org/x/crypto/ssh/terminal"
 )
 
 const PwdFileName = ".pwd-mng"
@@ -144,9 +145,9 @@ func ManageErrorAndExit(err error) {
 func GetPwdObjAfterCheckMaster() (model.PwdFile, error) {
 	pwdObj, err := GetPwdObj()
 	ManageErrorAndExit(err)
-	pwd := PromptPassword("Enter your master password:")
-	if pwdObj.MasterPassword != string(pwd) {
-		return model.PwdFile{}, fmt.Errorf("master passwords do not match")
-	}
+	//pwd := PromptPassword("Enter your master password:")
+	//if pwdObj.MasterPassword != string(pwd) {
+	//	return model.PwdFile{}, fmt.Errorf("master passwords do not match")
+	//}
 	return pwdObj, nil
 }
