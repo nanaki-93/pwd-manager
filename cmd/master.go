@@ -46,11 +46,10 @@ func savePassword(currPwdContent model.PwdFile) {
 	var err error
 	if currPwdContent.MasterPassword != "" {
 		currPassword = utils.PromptPassword("Enter your current password:")
-	}
-
-	if len(currPassword) != 0 && currPwdContent.MasterPassword != string(currPassword) {
-		fmt.Println("Passwords do not match")
-		return
+		if currPwdContent.MasterPassword != string(currPassword) {
+			fmt.Println("Passwords do not match")
+			return
+		}
 	}
 
 	newPassword = utils.PromptPassword("Enter your new password:")
