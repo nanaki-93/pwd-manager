@@ -102,16 +102,17 @@ func readPwdFile() ([]byte, error) {
 }
 
 func GetPwdObj() (model.PwdFile, error) {
-	pwdFileContent, err := readPwdFile()
+	content := model.PwdFile{}
+
+	fileContent, err := readPwdFile()
 	if err != nil {
-		return model.PwdFile{}, err
+		return content, err
 	}
 
-	content := model.PwdFile{}
-	err = json.Unmarshal(pwdFileContent, &content)
+	err = json.Unmarshal(fileContent, &content)
 	if err != nil {
 		fmt.Println(err)
-		return model.PwdFile{}, err
+		return content, err
 	}
 
 	return content, nil
