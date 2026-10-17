@@ -14,6 +14,8 @@ import (
 	"strings"
 )
 
+var addCopyFlag bool
+
 // addCmd represents the add command
 var addCmd = &cobra.Command{
 	Use:   "add",
@@ -23,6 +25,7 @@ var addCmd = &cobra.Command{
 
 func init() {
 	rootCmd.AddCommand(addCmd)
+	addCmd.Flags().BoolVarP(&addCopyFlag, "copy", "c", false, "Copy the password to the clipboard")
 }
 
 func readPwdName(r io.Reader) (string, error) {
@@ -76,4 +79,7 @@ func execAddCmd(cmd *cobra.Command, args []string) {
 	pwdValue := utils.PromptPassword("Insert the password for " + pwdName + ":")
 	pwdObj.SavedPasswords[pwdName] = string(pwdValue)
 	utils.SaveFile(pwdObj, err)
+	if addCopyFlag {
+		_ = copyPasswordToClipboard(string(pwdValue))
+	}
 }
