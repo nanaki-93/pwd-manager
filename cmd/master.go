@@ -5,12 +5,16 @@ package cmd
 
 import (
 	"crypto/rand"
+	"errors"
 	"fmt"
 	"github.com/nanaki-93/pwd-manager/internal/model"
 	"github.com/nanaki-93/pwd-manager/internal/utils"
 	"github.com/spf13/cobra"
+	"io"
 	"os"
 )
+
+var randRead = io.ReadFull
 
 // masterCmd represents the master command
 var masterCmd = &cobra.Command{
@@ -25,7 +29,14 @@ func execMasterCmd(cmd *cobra.Command, args []string) {
 	currPwdContent, err := utils.GetPwdObj()
 	updatePwd := "y"
 	if err != nil {
-		generateKey()
+		if !errors.Is(err, os.ErrNotExist) {
+			utils.ManageErrorAndExit(err)
+			return
+		}
+		if err := generateKey(); err != nil {
+			utils.ManageErrorAndExit(err)
+			return
+		}
 		fmt.Println("You don't have a master password yet.")
 		isToInit = true
 	}
@@ -57,18 +68,21 @@ func savePassword(currPwdContent model.PwdFile) {
 	utils.SaveFile(currPwdContent, err)
 	fmt.Println("Password saved")
 }
-func generateKey() {
+func generateKey() error {
 	utils.GoToHomeDir()
 	fmt.Println("Generating a key to encrypt your file:")
 	key := make([]byte, 32)
 
-	_, err := rand.Read(key)
+	_, err := randRead(rand.Reader, key)
 	if err != nil {
-		fmt.Println(err)
+		return err
 	}
 
 	err = os.WriteFile(utils.PwdFileKey, key, 0700)
-	utils.ManageErrorAndExit(err)
+	if err != nil {
+		return err
+	}
+	return nil
 }
 func init() {
 	rootCmd.AddCommand(masterCmd)

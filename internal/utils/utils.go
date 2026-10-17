@@ -7,6 +7,8 @@ import (
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/rand"
+	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -145,10 +147,15 @@ func ManageErrorAndExit(err error) {
 
 func GetPwdObjAfterCheckMaster() (model.PwdFile, error) {
 	pwdObj, err := GetPwdObj()
-	ManageErrorAndExit(err)
-	//pwd := PromptPassword("Enter your master password:")
-	//if pwdObj.MasterPassword != string(pwd) {
-	//	return model.PwdFile{}, fmt.Errorf("master passwords do not match")
-	//}
+	if err != nil {
+		ManageErrorAndExit(err)
+		return model.PwdFile{}, err
+	}
+	pwd := PromptPassword("Enter your master password:")
+	expectedHash := sha256.Sum256([]byte(pwdObj.MasterPassword))
+	actualHash := sha256.Sum256(pwd)
+	if subtle.ConstantTimeCompare(expectedHash[:], actualHash[:]) != 1 {
+		return model.PwdFile{}, fmt.Errorf("master passwords do not match")
+	}
 	return pwdObj, nil
 }
