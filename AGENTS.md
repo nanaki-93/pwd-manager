@@ -1,7 +1,28 @@
-# Project instructions
+# pwd-manager Agent Contract
 
-## Project overview and architecture
+Keep this contract under 150 lines so human developers and coding agents share identical operational rules.
 
-- Trace the entry point, owning package and callers before changing Go behavior. Keep transport, business rules and persistence in their existing packages; introduce interfaces at real consumer boundaries rather than for hypothetical reuse.
-- Read the root AGENTS.md and applicable directory guides before editing. Keep local rules within their directory scope, resolve conflicts using the more specific applicable guide, and follow the user's explicit task instructions. Guidance does not grant permission for unrelated actions.
-- Read the project overview and nearby implementations, then trace the affected entry point, state owner, callers and tests. Put the change in the layer that owns the behavior and preserve established module boundaries instead of duplicating domain rules in adapters.
+## 1. Quick Commands & Single-Test Execution
+
+- Bootstrap & entrypoints (`justfile`): `just setup`, `just dev`, `just test`, `just check`.
+- Run a single test: `just test-one TestName`.
+- Always run `just check` before committing changes.
+
+## 2. Architecture Boundaries
+
+- Entrypoints and HTTP/UI handlers must never import database or storage packages directly; always go through service interfaces.
+- Domain and indexing packages must remain pure and never import transport or presentation layers.
+- Keep diffs surgical and scoped to the requested change, its callers, and its regression tests.
+
+## 3. Error Handling & Concurrency Conventions
+
+- Handle all errors explicitly with actionable context (e.g., `fmt.Errorf("action: %w", err)`). Never swallow errors or silently return fallback values.
+- Propagate cancellation (`context.Context` / `AbortSignal`) across all I/O, child processes, and model calls.
+- Guard shared state with explicit synchronization and ensure no background workers leak after a task or test finishes.
+
+
+## Architecture boundaries & ownership
+
+- Max function complexity: 15
+- Max function lines: 80
+- Max file lines: 800
