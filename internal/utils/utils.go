@@ -6,13 +6,18 @@ package utils
 import (
 	"crypto/aes"
 	"crypto/cipher"
+	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
 	"crypto/subtle"
+	"encoding/binary"
+	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
+	"strings"
 	"syscall"
 
 	"github.com/nanaki-93/pwd-manager/internal/model"
@@ -22,52 +27,162 @@ import (
 const PwdFileName = ".pwd-mng"
 const PwdFileKey = ".pwd-key"
 
-func encryptFile(content []byte) {
-	GoToHomeDir()
+const (
+	hashPrefix     = "pbkdf2-sha256$"
+	saltSize       = 16
+	pbkdf2Iter     = 100000
+	derivedKeySize = 32
+)
+
+var (
+	exitFunc          = os.Exit
+	randRead          = io.ReadFull
+	readPasswordStdin = func() ([]byte, error) { return terminal.ReadPassword(int(syscall.Stdin)) }
+)
+
+// SetExitFunc overrides the process termination function for testing and returns a restore callback.
+func SetExitFunc(fn func(int)) func() {
+	prev := exitFunc
+	exitFunc = fn
+	return func() {
+		exitFunc = prev
+	}
+}
+
+// SetReadPasswordStdin overrides the password reader for testing and returns a restore callback.
+func SetReadPasswordStdin(fn func() ([]byte, error)) func() {
+	prev := readPasswordStdin
+	readPasswordStdin = fn
+	return func() {
+		readPasswordStdin = prev
+	}
+}
+
+// HashMasterPassword generates a salted PBKDF2-SHA256 hash of the supplied password.
+func HashMasterPassword(password []byte) (string, error) {
+	salt := make([]byte, saltSize)
+	if _, err := randRead(rand.Reader, salt); err != nil {
+		return "", fmt.Errorf("generate salt: %w", err)
+	}
+	dk := pbkdf2SHA256(password, salt, pbkdf2Iter, derivedKeySize)
+	return fmt.Sprintf("%s%s$%s", hashPrefix, hex.EncodeToString(salt), hex.EncodeToString(dk)), nil
+}
+
+// VerifyMasterPassword checks candidate against stored in constant time.
+func VerifyMasterPassword(stored string, candidate []byte) bool {
+	if stored == "" {
+		return false
+	}
+	if strings.HasPrefix(stored, hashPrefix) {
+		return verifyPBKDF2(strings.TrimPrefix(stored, hashPrefix), candidate)
+	}
+	expectedHash := sha256.Sum256([]byte(stored))
+	actualHash := sha256.Sum256(candidate)
+	return subtle.ConstantTimeCompare(expectedHash[:], actualHash[:]) == 1
+}
+
+func verifyPBKDF2(encoded string, candidate []byte) bool {
+	parts := strings.Split(encoded, "$")
+	if len(parts) != 2 {
+		return false
+	}
+	salt, err := hex.DecodeString(parts[0])
+	if err != nil || len(salt) == 0 {
+		return false
+	}
+	expectedDK, err := hex.DecodeString(parts[1])
+	if err != nil || len(expectedDK) == 0 {
+		return false
+	}
+	actualDK := pbkdf2SHA256(candidate, salt, pbkdf2Iter, len(expectedDK))
+	return subtle.ConstantTimeCompare(expectedDK, actualDK) == 1
+}
+
+func pbkdf2SHA256(password, salt []byte, iter, keyLen int) []byte {
+	prk := func(msg []byte) []byte {
+		mac := hmac.New(sha256.New, password)
+		mac.Write(msg)
+		return mac.Sum(nil)
+	}
+	hashLen := sha256.Size
+	numBlocks := (keyLen + hashLen - 1) / hashLen
+	var dk []byte
+	var intBuf [4]byte
+	for block := 1; block <= numBlocks; block++ {
+		binary.BigEndian.PutUint32(intBuf[:], uint32(block))
+		saltBlock := make([]byte, len(salt)+4)
+		copy(saltBlock, salt)
+		copy(saltBlock[len(salt):], intBuf[:])
+		u := prk(saltBlock)
+		t := make([]byte, len(u))
+		copy(t, u)
+		for i := 2; i <= iter; i++ {
+			u = prk(u)
+			for j := range t {
+				t[j] ^= u[j]
+			}
+		}
+		dk = append(dk, t...)
+	}
+	return dk[:keyLen]
+}
+
+func encryptFile(content []byte) error {
+	if err := chdirHome(); err != nil {
+		return err
+	}
 	// Reading key
 	key, err := os.ReadFile(PwdFileKey)
 	if err != nil {
-		fmt.Printf("read file err: %v", err.Error())
+		return fmt.Errorf("read key file: %w", err)
 	}
 
 	// Creating block of algorithm
 	block, err := aes.NewCipher(key)
 	if err != nil {
-		fmt.Printf("cipher err: %v", err.Error())
+		return fmt.Errorf("cipher init: %w", err)
 	}
 
 	// Creating GCM mode
 	gcm, err := cipher.NewGCM(block)
 	if err != nil {
-		fmt.Printf("cipher GCM err: %v", err.Error())
+		return fmt.Errorf("cipher GCM init: %w", err)
 	}
 
 	// Generating random nonce
 	nonce := make([]byte, gcm.NonceSize())
-	if _, err := io.ReadFull(rand.Reader, nonce); err != nil {
-		fmt.Printf("nonce  err: %v", err.Error())
+	if _, err := randRead(rand.Reader, nonce); err != nil {
+		return fmt.Errorf("generate nonce: %w", err)
 	}
 
-	// Decrypt file
+	// Encrypt file
 	cipherText := gcm.Seal(nonce, nonce, content, nil)
 
 	// Writing ciphertext file
-	err = os.WriteFile(PwdFileName, cipherText, 0700)
-	if err != nil {
-		fmt.Printf("write file err: %v", err.Error())
+	if err := os.WriteFile(PwdFileName, cipherText, 0700); err != nil {
+		return fmt.Errorf("write encrypted file: %w", err)
 	}
+	return nil
+}
 
+func chdirHome() error {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return err
+	}
+	return os.Chdir(home)
 }
 
 func GoToHomeDir() {
-	home, err := os.UserHomeDir()
-	ManageErrorAndExit(err)
-	err = os.Chdir(home)
-	ManageErrorAndExit(err)
+	if err := chdirHome(); err != nil {
+		ManageErrorAndExit(err)
+	}
 }
 
 func readPwdFile() ([]byte, error) {
-	GoToHomeDir()
+	if err := chdirHome(); err != nil {
+		return nil, err
+	}
 	// Reading ciphertext file
 	cipherText, err := os.ReadFile(PwdFileName)
 	if err != nil {
@@ -83,21 +198,25 @@ func readPwdFile() ([]byte, error) {
 	// Creating block of algorithm
 	block, err := aes.NewCipher(key)
 	if err != nil {
-		fmt.Printf("cipher err: %v", err.Error())
+		return nil, fmt.Errorf("cipher err: %w", err)
 	}
 
 	// Creating GCM mode
 	gcm, err := cipher.NewGCM(block)
 	if err != nil {
-		fmt.Printf("cipher GCM err: %v", err.Error())
+		return nil, fmt.Errorf("cipher GCM err: %w", err)
 	}
 
-	// Deattached nonce and decrypt
+	if len(cipherText) < gcm.NonceSize() {
+		return nil, errors.New("ciphertext too short")
+	}
+
+	// Detached nonce and decrypt
 	nonce := cipherText[:gcm.NonceSize()]
 	cipherText = cipherText[gcm.NonceSize():]
 	plainText, err := gcm.Open(nil, nonce, cipherText, nil)
 	if err != nil {
-		fmt.Printf("decrypt file err: %v", err.Error())
+		return nil, fmt.Errorf("decrypt file err: %w", err)
 	}
 
 	return plainText, nil
@@ -120,28 +239,49 @@ func GetPwdObj() (model.PwdFile, error) {
 	return content, nil
 }
 
-func PromptPassword(textForPrompt string) []byte {
+func PromptPasswordErr(textForPrompt string) ([]byte, error) {
 	fmt.Println(textForPrompt)
-	promptedPassword, err := terminal.ReadPassword(int(syscall.Stdin))
+	return readPasswordStdin()
+}
+
+func PromptPassword(textForPrompt string) []byte {
+	promptedPassword, err := PromptPasswordErr(textForPrompt)
 	ManageErrorAndExit(err)
 	return promptedPassword
 }
 
-func SaveFile(currPwdContent model.PwdFile, err error) {
-	jsonContent := toJsonContent(err, currPwdContent)
-	encryptFile(jsonContent)
+func SaveFileErr(currPwdContent model.PwdFile, err error) error {
+	if err != nil {
+		return err
+	}
+	jsonContent, marshalErr := toJsonContent(err, currPwdContent)
+	if marshalErr != nil {
+		return marshalErr
+	}
+	return encryptFile(jsonContent)
 }
 
-func toJsonContent(err error, pwdContent model.PwdFile) []byte {
-	jsonContent, err := json.Marshal(pwdContent)
-	ManageErrorAndExit(err)
-	return jsonContent
+func SaveFile(currPwdContent model.PwdFile, err error) {
+	if saveErr := SaveFileErr(currPwdContent, err); saveErr != nil {
+		ManageErrorAndExit(saveErr)
+	}
+}
+
+func toJsonContent(err error, pwdContent model.PwdFile) ([]byte, error) {
+	if err != nil {
+		return nil, err
+	}
+	jsonContent, marshalErr := json.Marshal(pwdContent)
+	if marshalErr != nil {
+		return nil, marshalErr
+	}
+	return jsonContent, nil
 }
 
 func ManageErrorAndExit(err error) {
 	if err != nil {
 		fmt.Println(err)
-		return
+		exitFunc(1)
 	}
 }
 
@@ -152,9 +292,7 @@ func GetPwdObjAfterCheckMaster() (model.PwdFile, error) {
 		return model.PwdFile{}, err
 	}
 	pwd := PromptPassword("Enter your master password:")
-	expectedHash := sha256.Sum256([]byte(pwdObj.MasterPassword))
-	actualHash := sha256.Sum256(pwd)
-	if subtle.ConstantTimeCompare(expectedHash[:], actualHash[:]) != 1 {
+	if !VerifyMasterPassword(pwdObj.MasterPassword, pwd) {
 		return model.PwdFile{}, fmt.Errorf("master passwords do not match")
 	}
 	return pwdObj, nil
