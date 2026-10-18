@@ -43,7 +43,10 @@ func execMasterCmd(cmd *cobra.Command, args []string) {
 	if !isToInit {
 		fmt.Println("Do you want to update your master password? (y/n)")
 		_, err := fmt.Scanln(&updatePwd)
-		utils.ManageErrorAndExit(err)
+		if err != nil {
+			utils.ManageErrorAndExit(err)
+			return
+		}
 	}
 
 	if isToInit || updatePwd == "y" {
@@ -54,18 +57,25 @@ func execMasterCmd(cmd *cobra.Command, args []string) {
 func savePassword(currPwdContent model.PwdFile) {
 	var currPassword []byte
 	var newPassword []byte
-	var err error
 	if currPwdContent.MasterPassword != "" {
 		currPassword = utils.PromptPassword("Enter your current password:")
-		if currPwdContent.MasterPassword != string(currPassword) {
+		if !utils.VerifyMasterPassword(currPwdContent.MasterPassword, currPassword) {
 			fmt.Println("Passwords do not match")
 			return
 		}
 	}
 
 	newPassword = utils.PromptPassword("Enter your new password:")
-	currPwdContent.MasterPassword = string(newPassword)
-	utils.SaveFile(currPwdContent, err)
+	hashedPassword, err := utils.HashMasterPassword(newPassword)
+	if err != nil {
+		utils.ManageErrorAndExit(err)
+		return
+	}
+	currPwdContent.MasterPassword = hashedPassword
+	if err := utils.SaveFileErr(currPwdContent, nil); err != nil {
+		utils.ManageErrorAndExit(err)
+		return
+	}
 	fmt.Println("Password saved")
 }
 func generateKey() error {
