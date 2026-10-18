@@ -1,0 +1,7 @@
+# Pinned runtime and linter toolchain for pwd-manager
+[tools]
+go = "1.22"
+golangci-lint = "1.63.4"
+just = "1.36.0"
+lefthook = "1.10.10"
+gitleaks = "8.24.0"
