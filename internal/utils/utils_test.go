@@ -4,8 +4,16 @@ Copyright © 2025 Marco Andreose <andreose.marco93@gmail.com>
 package utils
 
 import (
+	"bytes"
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/binary"
+	"encoding/hex"
+	"fmt"
 	"strings"
 	"testing"
+
+	"golang.org/x/crypto/pbkdf2"
 )
 
 func TestHashMasterPassword(t *testing.T) {
@@ -132,5 +140,104 @@ func TestVerifyMasterPassword_MalformedPBKDF2(t *testing.T) {
 				t.Errorf("VerifyMasterPassword(%q, %q) = true, want false", tc.stored, password)
 			}
 		})
+	}
+}
+
+func TestVerifyMasterPassword_SingleByteDerivedKey(t *testing.T) {
+	password := []byte("secret-master-password")
+	salt := make([]byte, saltSize)
+	oneByteDK := pbkdf2SHA256(password, salt, pbkdf2Iter, 1)
+	singleByteRecord := fmt.Sprintf("%s%s$%s", hashPrefix, hex.EncodeToString(salt), hex.EncodeToString(oneByteDK))
+	if VerifyMasterPassword(singleByteRecord, password) {
+		t.Errorf("VerifyMasterPassword(%q, %q) = true, want false (accepted single-byte derived key)", singleByteRecord, password)
+	}
+
+	truncatedSalt := fmt.Sprintf("%s%s$%s", hashPrefix, "00", hex.EncodeToString(make([]byte, derivedKeySize)))
+	if VerifyMasterPassword(truncatedSalt, password) {
+		t.Errorf("VerifyMasterPassword(%q, %q) = true, want false (accepted truncated salt)", truncatedSalt, password)
+	}
+}
+
+func TestPBKDF2SHA256_Equivalence(t *testing.T) {
+	password := []byte("test-equivalence-password")
+	salt := []byte("1234567890123456")
+	iter := 100
+	keyLen := 32
+	got := pbkdf2SHA256(password, salt, iter, keyLen)
+	wantCrypto := pbkdf2.Key(password, salt, iter, keyLen, sha256.New)
+	if !bytes.Equal(got, wantCrypto) {
+		t.Errorf("pbkdf2SHA256 output does not match x/crypto/pbkdf2")
+	}
+	wantReused := pbkdf2SHA256ReusedHMAC(password, salt, iter, keyLen)
+	if !bytes.Equal(got, wantReused) {
+		t.Errorf("pbkdf2SHA256 output does not match pbkdf2SHA256ReusedHMAC")
+	}
+}
+
+func pbkdf2SHA256ReusedHMAC(password, salt []byte, iter, keyLen int) []byte {
+	if keyLen <= 0 {
+		return nil
+	}
+	mac := hmac.New(sha256.New, password)
+	hashLen := sha256.Size
+	numBlocks := (keyLen + hashLen - 1) / hashLen
+	dk := make([]byte, 0, numBlocks*hashLen)
+	var intBuf [4]byte
+	saltBlock := make([]byte, len(salt)+4)
+	copy(saltBlock, salt)
+	u := make([]byte, hashLen)
+	uBuf := make([]byte, hashLen)
+	t := make([]byte, hashLen)
+
+	for block := 1; block <= numBlocks; block++ {
+		binary.BigEndian.PutUint32(intBuf[:], uint32(block))
+		copy(saltBlock[len(salt):], intBuf[:])
+
+		mac.Reset()
+		mac.Write(saltBlock)
+		u = mac.Sum(u[:0])
+		copy(t, u)
+
+		for i := 2; i <= iter; i++ {
+			mac.Reset()
+			mac.Write(u)
+			uBuf = mac.Sum(uBuf[:0])
+			for j := range t {
+				t[j] ^= uBuf[j]
+			}
+			u, uBuf = uBuf, u
+		}
+		dk = append(dk, t...)
+	}
+	return dk[:keyLen]
+}
+
+func BenchmarkPBKDF2SHA256(b *testing.B) {
+	password := []byte("benchmark-password")
+	salt := make([]byte, saltSize)
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_ = pbkdf2SHA256(password, salt, 1000, derivedKeySize)
+	}
+}
+
+func BenchmarkPBKDF2SHA256_ReusedHMAC(b *testing.B) {
+	password := []byte("benchmark-password")
+	salt := make([]byte, saltSize)
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_ = pbkdf2SHA256ReusedHMAC(password, salt, 1000, derivedKeySize)
+	}
+}
+
+func BenchmarkPBKDF2SHA256_CryptoPBKDF2(b *testing.B) {
+	password := []byte("benchmark-password")
+	salt := make([]byte, saltSize)
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_ = pbkdf2.Key(password, salt, 1000, derivedKeySize, sha256.New)
 	}
 }

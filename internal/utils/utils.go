@@ -87,40 +87,49 @@ func verifyPBKDF2(encoded string, candidate []byte) bool {
 		return false
 	}
 	salt, err := hex.DecodeString(parts[0])
-	if err != nil || len(salt) == 0 {
+	if err != nil || len(salt) != saltSize {
 		return false
 	}
 	expectedDK, err := hex.DecodeString(parts[1])
-	if err != nil || len(expectedDK) == 0 {
+	if err != nil || len(expectedDK) != derivedKeySize {
 		return false
 	}
-	actualDK := pbkdf2SHA256(candidate, salt, pbkdf2Iter, len(expectedDK))
+	actualDK := pbkdf2SHA256(candidate, salt, pbkdf2Iter, derivedKeySize)
 	return subtle.ConstantTimeCompare(expectedDK, actualDK) == 1
 }
 
 func pbkdf2SHA256(password, salt []byte, iter, keyLen int) []byte {
-	prk := func(msg []byte) []byte {
-		mac := hmac.New(sha256.New, password)
-		mac.Write(msg)
-		return mac.Sum(nil)
+	if keyLen <= 0 {
+		return nil
 	}
+	mac := hmac.New(sha256.New, password)
 	hashLen := sha256.Size
 	numBlocks := (keyLen + hashLen - 1) / hashLen
-	var dk []byte
+	dk := make([]byte, 0, numBlocks*hashLen)
 	var intBuf [4]byte
+	saltBlock := make([]byte, len(salt)+4)
+	copy(saltBlock, salt)
+	u := make([]byte, hashLen)
+	uBuf := make([]byte, hashLen)
+	t := make([]byte, hashLen)
+
 	for block := 1; block <= numBlocks; block++ {
 		binary.BigEndian.PutUint32(intBuf[:], uint32(block))
-		saltBlock := make([]byte, len(salt)+4)
-		copy(saltBlock, salt)
 		copy(saltBlock[len(salt):], intBuf[:])
-		u := prk(saltBlock)
-		t := make([]byte, len(u))
+
+		mac.Reset()
+		mac.Write(saltBlock)
+		u = mac.Sum(u[:0])
 		copy(t, u)
+
 		for i := 2; i <= iter; i++ {
-			u = prk(u)
+			mac.Reset()
+			mac.Write(u)
+			uBuf = mac.Sum(uBuf[:0])
 			for j := range t {
-				t[j] ^= u[j]
+				t[j] ^= uBuf[j]
 			}
+			u, uBuf = uBuf, u
 		}
 		dk = append(dk, t...)
 	}
