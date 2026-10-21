@@ -171,6 +171,114 @@ func TestExecMasterCmdInitializesKeyAndHashedPassword(t *testing.T) {
 	}
 }
 
+func feedStdinInput(t *testing.T, input string, fn func()) {
+	t.Helper()
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("failed to create pipe: %v", err)
+	}
+	origStdin := os.Stdin
+	os.Stdin = r
+	defer func() {
+		os.Stdin = origStdin
+		_ = r.Close()
+	}()
+	if _, err := w.WriteString(input); err != nil {
+		t.Fatalf("failed to write stdin input: %v", err)
+	}
+	_ = w.Close()
+	fn()
+}
+
+func TestExecMasterCmdNormalizesUpdateConfirmation(t *testing.T) {
+	_ = withTempHome(t)
+	stubPasswordSequence(t,
+		"initial-secret",
+		"initial-secret", "updated-secret-1",
+		"updated-secret-1", "updated-secret-2",
+		"updated-secret-2", "updated-secret-3",
+		"updated-secret-3", "updated-secret-4",
+		"updated-secret-4", "updated-secret-5",
+	)
+
+	execMasterCmd(masterCmd, nil)
+
+	affirmatives := []struct {
+		input      string
+		wantSecret string
+	}{
+		{"Y\n", "updated-secret-1"},
+		{"yes\n", "updated-secret-2"},
+		{"YES\n", "updated-secret-3"},
+		{"  YeS\n", "updated-secret-4"},
+		{"y\n", "updated-secret-5"},
+	}
+
+	for _, tc := range affirmatives {
+		feedStdinInput(t, tc.input, func() {
+			execMasterCmd(masterCmd, nil)
+		})
+		loaded, err := utils.GetPwdObj()
+		if err != nil || !utils.VerifyMasterPassword(loaded.MasterPassword, []byte(tc.wantSecret)) {
+			t.Fatalf("expected %q confirmation to update password to %q, err=%v", tc.input, tc.wantSecret, err)
+		}
+	}
+
+	feedStdinInput(t, "n\n", func() {
+		execMasterCmd(masterCmd, nil)
+	})
+	loaded, err := utils.GetPwdObj()
+	if err != nil || !utils.VerifyMasterPassword(loaded.MasterPassword, []byte("updated-secret-5")) {
+		t.Fatalf("expected 'n' confirmation to keep existing password, err=%v", err)
+	}
+}
+
+func TestExecMasterCmdConfirmationBoundariesAndScanError(t *testing.T) {
+	_ = withTempHome(t)
+	stubPasswordSequence(t, "initial-secret")
+	execMasterCmd(masterCmd, nil)
+
+	initialLoaded, err := utils.GetPwdObj()
+	if err != nil {
+		t.Fatalf("expected GetPwdObj to succeed after initial setup: %v", err)
+	}
+
+	for _, nonAffirmative := range []string{"N\n", "no\n", "NO\n", "yeah\n", "yess\n"} {
+		feedStdinInput(t, nonAffirmative, func() {
+			execMasterCmd(masterCmd, nil)
+		})
+		loaded, err := utils.GetPwdObj()
+		if err != nil {
+			t.Fatalf("failed to load password file after input %q: %v", nonAffirmative, err)
+		}
+		if loaded.MasterPassword != initialLoaded.MasterPassword {
+			t.Fatalf("expected non-affirmative input %q not to modify master password", nonAffirmative)
+		}
+	}
+
+	exitCalled := false
+	restoreExit := utils.SetExitFunc(func(code int) {
+		if code != 0 {
+			exitCalled = true
+		}
+	})
+	defer restoreExit()
+
+	feedStdinInput(t, "", func() {
+		execMasterCmd(masterCmd, nil)
+	})
+	if !exitCalled {
+		t.Fatalf("expected ManageErrorAndExit to be called on EOF when scanning confirmation")
+	}
+	afterScanErr, err := utils.GetPwdObj()
+	if err != nil {
+		t.Fatalf("failed to load password file after scan error: %v", err)
+	}
+	if afterScanErr.MasterPassword != initialLoaded.MasterPassword {
+		t.Fatalf("expected master password to remain unchanged when confirmation scan fails")
+	}
+}
+
 func TestGetPwdObjAfterCheckMasterPropagatesLoadError(t *testing.T) {
 	_ = withTempHome(t)
 

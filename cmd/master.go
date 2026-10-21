@@ -52,7 +52,8 @@ func execMasterCmd(cmd *cobra.Command, args []string) {
 		}
 	}
 
-	if isToInit || updatePwd == "y" {
+	normalizedUpdate := strings.ToLower(strings.TrimSpace(updatePwd))
+	if isToInit || normalizedUpdate == "y" || normalizedUpdate == "yes" {
 		savePassword(currPwdContent)
 	}
 
