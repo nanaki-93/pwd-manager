@@ -13,6 +13,7 @@ import (
 	"github.com/spf13/cobra"
 	"io"
 	"os"
+	"strings"
 )
 
 const minMasterPasswordLen = 8
@@ -116,12 +117,12 @@ func generateKey() error {
 
 	_, err := randRead(rand.Reader, key)
 	if err != nil {
-		return err
+		return fmt.Errorf("read random key bytes: %w", err)
 	}
 
 	err = os.WriteFile(utils.PwdFileKey, key, 0600)
 	if err != nil {
-		return err
+		return fmt.Errorf("write key file: %w", err)
 	}
 	return nil
 }
