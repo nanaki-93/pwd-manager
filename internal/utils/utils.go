@@ -70,15 +70,10 @@ func HashMasterPassword(password []byte) (string, error) {
 
 // VerifyMasterPassword checks candidate against stored in constant time.
 func VerifyMasterPassword(stored string, candidate []byte) bool {
-	if stored == "" {
+	if !strings.HasPrefix(stored, hashPrefix) {
 		return false
 	}
-	if strings.HasPrefix(stored, hashPrefix) {
-		return verifyPBKDF2(strings.TrimPrefix(stored, hashPrefix), candidate)
-	}
-	expectedHash := sha256.Sum256([]byte(stored))
-	actualHash := sha256.Sum256(candidate)
-	return subtle.ConstantTimeCompare(expectedHash[:], actualHash[:]) == 1
+	return verifyPBKDF2(strings.TrimPrefix(stored, hashPrefix), candidate)
 }
 
 func verifyPBKDF2(encoded string, candidate []byte) bool {
@@ -250,7 +245,14 @@ func GetPwdObj() (model.PwdFile, error) {
 
 func PromptPasswordErr(textForPrompt string) ([]byte, error) {
 	fmt.Println(textForPrompt)
-	return readPasswordStdin()
+	pwd, err := readPasswordStdin()
+	if err != nil {
+		return nil, err
+	}
+	if pwd == nil {
+		return []byte{}, nil
+	}
+	return pwd, nil
 }
 
 func PromptPassword(textForPrompt string) []byte {

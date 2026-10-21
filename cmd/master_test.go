@@ -267,6 +267,7 @@ func TestVerifyMasterPasswordBoundariesAndLegacyFallback(t *testing.T) {
 		"pbkdf2-sha256$$abcd",
 		"pbkdf2-sha256$abcd$not-hex",
 		"pbkdf2-sha256$abcd$",
+		"legacy-plaintext",
 	}
 	for _, stored := range invalidStored {
 		if utils.VerifyMasterPassword(stored, raw) {
@@ -277,11 +278,8 @@ func TestVerifyMasterPasswordBoundariesAndLegacyFallback(t *testing.T) {
 		}
 	}
 
-	if !utils.VerifyMasterPassword("legacy-plaintext", []byte("legacy-plaintext")) {
-		t.Fatalf("expected legacy plaintext verification to succeed on exact match")
-	}
-	if utils.VerifyMasterPassword("legacy-plaintext", []byte("wrong-plaintext")) {
-		t.Fatalf("expected legacy plaintext verification to fail on mismatch")
+	if utils.VerifyMasterPassword("legacy-plaintext", []byte("legacy-plaintext")) {
+		t.Fatalf("expected unprefixed plaintext verification to be rejected")
 	}
 }
 
@@ -383,6 +381,87 @@ func stubPasswordSequence(t *testing.T, inputs ...string) {
 		return p, nil
 	})
 	t.Cleanup(restore)
+}
+
+func assertWeakPasswordRejected(t *testing.T, tmpHome, candidate, wantErr string) {
+	t.Helper()
+	err := validateMasterPassword([]byte(candidate))
+	if err == nil || !strings.Contains(err.Error(), wantErr) {
+		t.Fatalf("validateMasterPassword(%q) = %v, want error containing %q", candidate, err, wantErr)
+	}
+
+	stubPasswordSequence(t, candidate)
+	exitCalled := false
+	restoreExit := utils.SetExitFunc(func(code int) {
+		if code != 0 {
+			exitCalled = true
+		}
+	})
+	savePassword(model.PwdFile{})
+	restoreExit()
+
+	if !exitCalled {
+		t.Fatalf("expected ManageErrorAndExit to be called for weak master password %q", candidate)
+	}
+	if _, statErr := os.Stat(filepath.Join(tmpHome, utils.PwdFileName)); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("expected password file not to be written for weak password %q, stat err: %v", candidate, statErr)
+	}
+}
+
+func TestSavePasswordRejectsEmptyAndWeakInputs(t *testing.T) {
+	tmpHome := withTempHome(t)
+	keyPath := filepath.Join(tmpHome, utils.PwdFileKey)
+	if err := os.WriteFile(keyPath, bytes.Repeat([]byte{0x77}, 32), 0700); err != nil {
+		t.Fatalf("failed to write key file: %v", err)
+	}
+
+	tests := []struct {
+		name, candidate, wantErr string
+	}{
+		{"empty input", "", "master password cannot be empty"},
+		{"whitespace only input", "   \t\n  ", "master password cannot be empty"},
+		{"short input", "short", "at least 8 characters"},
+		{"seven character boundary input", "1234567", "at least 8 characters"},
+		{"padded short input", "  1234567  ", "at least 8 characters"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			assertWeakPasswordRejected(t, tmpHome, tc.candidate, tc.wantErr)
+		})
+	}
+
+	if err := validateMasterPassword([]byte("12345678")); err != nil {
+		t.Fatalf("expected 8-character password to pass validation, got: %v", err)
+	}
+}
+
+func TestSavePasswordRejectsNilReaderSlice(t *testing.T) {
+	tmpHome := withTempHome(t)
+	keyPath := filepath.Join(tmpHome, utils.PwdFileKey)
+	if err := os.WriteFile(keyPath, bytes.Repeat([]byte{0x77}, 32), 0700); err != nil {
+		t.Fatalf("failed to write key file: %v", err)
+	}
+
+	restoreReader := utils.SetReadPasswordStdin(func() ([]byte, error) {
+		return nil, nil
+	})
+	defer restoreReader()
+
+	exitCalled := false
+	restoreExit := utils.SetExitFunc(func(code int) {
+		if code != 0 {
+			exitCalled = true
+		}
+	})
+	savePassword(model.PwdFile{})
+	restoreExit()
+
+	if !exitCalled {
+		t.Fatalf("expected ManageErrorAndExit to be called when reader returns (nil, nil)")
+	}
+	if _, statErr := os.Stat(filepath.Join(tmpHome, utils.PwdFileName)); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("expected password file not to be written when reader returns (nil, nil), stat err: %v", statErr)
+	}
 }
 
 func TestSavePasswordInitialAndMismatch(t *testing.T) {

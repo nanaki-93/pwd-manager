@@ -58,6 +58,7 @@ func TestVerifyMasterPassword_PBKDF2(t *testing.T) {
 }
 
 func TestVerifyMasterPassword_LegacyFallback(t *testing.T) {
+	rawDigestHex := fmt.Sprintf("%x", sha256.Sum256([]byte("legacy-secret-password")))
 	tests := []struct {
 		name      string
 		stored    string
@@ -65,10 +66,22 @@ func TestVerifyMasterPassword_LegacyFallback(t *testing.T) {
 		want      bool
 	}{
 		{
-			name:      "exact match on legacy plaintext password",
+			name:      "exact match on unprefixed plaintext password is rejected",
 			stored:    "legacy-secret-password",
 			candidate: []byte("legacy-secret-password"),
-			want:      true,
+			want:      false,
+		},
+		{
+			name:      "unprefixed single-pass sha256 digest is rejected",
+			stored:    rawDigestHex,
+			candidate: []byte("legacy-secret-password"),
+			want:      false,
+		},
+		{
+			name:      "unprefixed candidate matching digest string is rejected",
+			stored:    rawDigestHex,
+			candidate: []byte(rawDigestHex),
+			want:      false,
 		},
 		{
 			name:      "mismatched candidate on legacy plaintext password",
@@ -103,6 +116,28 @@ func TestVerifyMasterPassword_LegacyFallback(t *testing.T) {
 				t.Errorf("VerifyMasterPassword(%q, %q) = %v, want %v", tc.stored, tc.candidate, got, tc.want)
 			}
 		})
+	}
+}
+
+func TestVerifyMasterPassword_RejectsUnprefixedStrings(t *testing.T) {
+	TestVerifyMasterPassword_LegacyFallback(t)
+}
+
+func TestPromptPasswordErr_NormalizesNilSlice(t *testing.T) {
+	restore := SetReadPasswordStdin(func() ([]byte, error) {
+		return nil, nil
+	})
+	defer restore()
+
+	got, err := PromptPasswordErr("Enter password:")
+	if err != nil {
+		t.Fatalf("expected nil error from PromptPasswordErr, got %v", err)
+	}
+	if got == nil {
+		t.Fatalf("expected non-nil empty byte slice when reader returns (nil, nil), got nil")
+	}
+	if len(got) != 0 {
+		t.Fatalf("expected empty byte slice, got %q", got)
 	}
 }
 

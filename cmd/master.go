@@ -12,7 +12,10 @@ import (
 	"github.com/spf13/cobra"
 	"io"
 	"os"
+	"strings"
 )
+
+const minMasterPasswordLen = 8
 
 var randRead = io.ReadFull
 
@@ -66,6 +69,12 @@ func savePassword(currPwdContent model.PwdFile) {
 	}
 
 	newPassword = utils.PromptPassword("Enter your new password:")
+	if newPassword != nil {
+		if err := validateMasterPassword(newPassword); err != nil {
+			utils.ManageErrorAndExit(err)
+			return
+		}
+	}
 	hashedPassword, err := utils.HashMasterPassword(newPassword)
 	if err != nil {
 		utils.ManageErrorAndExit(err)
@@ -78,6 +87,18 @@ func savePassword(currPwdContent model.PwdFile) {
 	}
 	fmt.Println("Password saved")
 }
+
+func validateMasterPassword(password []byte) error {
+	trimmed := strings.TrimSpace(string(password))
+	if len(trimmed) == 0 {
+		return errors.New("master password cannot be empty")
+	}
+	if len(trimmed) < minMasterPasswordLen {
+		return fmt.Errorf("master password must be at least %d characters long", minMasterPasswordLen)
+	}
+	return nil
+}
+
 func generateKey() error {
 	utils.GoToHomeDir()
 	fmt.Println("Generating a key to encrypt your file:")
