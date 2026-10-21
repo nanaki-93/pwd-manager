@@ -81,10 +81,14 @@ func TestHandleGetOutputDefault(t *testing.T) {
 	}
 
 	passwords := map[string]string{"github": "s3cr3t"}
+	var gotErr error
 	out := captureStdout(t, func() {
-		handleGetOutput("github", passwords, false)
+		gotErr = handleGetOutput("github", passwords, false)
 	})
 
+	if gotErr != nil {
+		t.Fatalf("expected nil error, got %v", gotErr)
+	}
 	if called {
 		t.Fatalf("expected clipboard not to be called when copy flag is false")
 	}
@@ -104,10 +108,14 @@ func TestHandleGetOutputCopySuccess(t *testing.T) {
 	}
 
 	passwords := map[string]string{"github": "s3cr3t"}
+	var gotErr error
 	out := captureStdout(t, func() {
-		handleGetOutput("github", passwords, true)
+		gotErr = handleGetOutput("github", passwords, true)
 	})
 
+	if gotErr != nil {
+		t.Fatalf("expected nil error, got %v", gotErr)
+	}
 	if copied != "s3cr3t" {
 		t.Fatalf("expected 's3cr3t' copied to clipboard, got %q", copied)
 	}
@@ -123,15 +131,23 @@ func TestHandleGetOutputCopyError(t *testing.T) {
 	oldWrite := clipboardWriteAll
 	defer func() { clipboardWriteAll = oldWrite }()
 
+	clipErr := errors.New("clipboard unavailable")
 	clipboardWriteAll = func(text string) error {
-		return errors.New("clipboard unavailable")
+		return clipErr
 	}
 
 	passwords := map[string]string{"github": "s3cr3t"}
+	var gotErr error
 	out := captureStdout(t, func() {
-		handleGetOutput("github", passwords, true)
+		gotErr = handleGetOutput("github", passwords, true)
 	})
 
+	if !errors.Is(gotErr, clipErr) {
+		t.Fatalf("expected error wrapping %v, got %v", clipErr, gotErr)
+	}
+	if !strings.Contains(gotErr.Error(), "failed to copy password to clipboard: clipboard unavailable") {
+		t.Fatalf("expected wrapped error message, got %q", gotErr.Error())
+	}
 	if !strings.Contains(out, "failed to copy password to clipboard: clipboard unavailable") {
 		t.Fatalf("expected clear error message, got %q", out)
 	}
@@ -150,9 +166,13 @@ func TestHandleGetOutputEmptyAndMissingKeys(t *testing.T) {
 		return nil
 	}
 
+	var gotErr error
 	outEmpty := captureStdout(t, func() {
-		handleGetOutput("github", map[string]string{}, true)
+		gotErr = handleGetOutput("github", map[string]string{}, true)
 	})
+	if gotErr != nil {
+		t.Fatalf("expected nil error for empty savedPasswords, got %v", gotErr)
+	}
 	if called {
 		t.Fatalf("expected clipboard not to be called when savedPasswords is empty")
 	}
@@ -160,9 +180,25 @@ func TestHandleGetOutputEmptyAndMissingKeys(t *testing.T) {
 		t.Fatalf("expected empty passwords message, got %q", outEmpty)
 	}
 
-	outMissing := captureStdout(t, func() {
-		handleGetOutput("gitlab", map[string]string{"github": "s3cr3t"}, true)
+	outNil := captureStdout(t, func() {
+		gotErr = handleGetOutput("github", nil, true)
 	})
+	if gotErr != nil {
+		t.Fatalf("expected nil error for nil savedPasswords, got %v", gotErr)
+	}
+	if called {
+		t.Fatalf("expected clipboard not to be called when savedPasswords is nil")
+	}
+	if !strings.Contains(outNil, "No passwords saved with ") {
+		t.Fatalf("expected empty passwords message for nil map, got %q", outNil)
+	}
+
+	outMissing := captureStdout(t, func() {
+		gotErr = handleGetOutput("gitlab", map[string]string{"github": "s3cr3t"}, true)
+	})
+	if gotErr != nil {
+		t.Fatalf("expected nil error for missing key, got %v", gotErr)
+	}
 	if called {
 		t.Fatalf("expected clipboard not to be called when key is missing")
 	}
@@ -193,15 +229,20 @@ func TestCopyPasswordToClipboard(t *testing.T) {
 		t.Fatalf("expected no output on success, got %q", out)
 	}
 
+	clipErr := errors.New("no display")
 	clipboardWriteAll = func(text string) error {
-		return errors.New("no display")
+		return clipErr
 	}
+	var gotErr error
 	outErr := captureStdout(t, func() {
-		err := copyPasswordToClipboard("new-pass-123")
-		if err == nil {
+		gotErr = copyPasswordToClipboard("new-pass-123")
+		if gotErr == nil {
 			t.Fatalf("expected error when clipboard write fails")
 		}
 	})
+	if !errors.Is(gotErr, clipErr) {
+		t.Fatalf("expected error wrapping %v, got %v", clipErr, gotErr)
+	}
 	if !strings.Contains(outErr, "failed to copy password to clipboard: no display") {
 		t.Fatalf("expected clear error message, got %q", outErr)
 	}

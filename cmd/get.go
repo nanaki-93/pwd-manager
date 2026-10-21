@@ -31,27 +31,31 @@ func init() {
 
 func copyPasswordToClipboard(password string) error {
 	if err := clipboardWriteAll(password); err != nil {
-		fmt.Printf("failed to copy password to clipboard: %v\n", err)
-		return err
+		wrappedErr := fmt.Errorf("failed to copy password to clipboard: %w", err)
+		fmt.Println(wrappedErr)
+		return wrappedErr
 	}
 	return nil
 }
 
-func handleGetOutput(name string, savedPasswords map[string]string, copyToClipboard bool) {
+func handleGetOutput(name string, savedPasswords map[string]string, copyToClipboard bool) error {
 	if len(savedPasswords) == 0 {
 		fmt.Println("No passwords saved with ")
-		return
+		return nil
 	}
 	pwd, ok := savedPasswords[name]
 	if !ok {
 		fmt.Printf("Password with key '%s' not found", name)
-		return
+		return nil
 	}
 	if copyToClipboard {
-		_ = copyPasswordToClipboard(pwd)
-		return
+		if err := copyPasswordToClipboard(pwd); err != nil {
+			return err
+		}
+		return nil
 	}
 	fmt.Printf("%s:%s", name, pwd)
+	return nil
 }
 
 func execGetCmd(cmd *cobra.Command, args []string) {
@@ -59,5 +63,6 @@ func execGetCmd(cmd *cobra.Command, args []string) {
 	pwdObj, err := utils.GetPwdObjAfterCheckMaster()
 	utils.ManageErrorAndExit(err)
 
-	handleGetOutput(nameFlag, pwdObj.SavedPasswords, getCopyFlag)
+	err = handleGetOutput(nameFlag, pwdObj.SavedPasswords, getCopyFlag)
+	utils.ManageErrorAndExit(err)
 }
