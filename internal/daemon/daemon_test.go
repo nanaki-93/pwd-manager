@@ -19,6 +19,7 @@ func resetClipboardTestState(t *testing.T) {
 			clipboardTimer.Stop()
 			clipboardTimer = nil
 		}
+		clipboardToken = 0
 		clipboardMu.Unlock()
 
 		writeClipboard = origWrite
@@ -238,5 +239,136 @@ func TestCopyPasswordToClipboard_ReplacesExistingTimer(t *testing.T) {
 	callbacks[1]()
 	if currentClipboard != "" {
 		t.Fatalf("expected second timer callback to clear clipboard, got %q", currentClipboard)
+	}
+}
+
+func TestCopyPasswordToClipboard_StaleTimerDoesNotClearRecopiedSameSecret(t *testing.T) {
+	resetClipboardTestState(t)
+
+	var currentClipboard string
+	writeClipboard = func(text string) error {
+		currentClipboard = text
+		return nil
+	}
+	readClipboard = func() (string, error) {
+		return currentClipboard, nil
+	}
+
+	var callbacks []func()
+	var timers []*time.Timer
+	afterFunc = func(d time.Duration, f func()) *time.Timer {
+		callbacks = append(callbacks, f)
+		tm := time.NewTimer(time.Hour)
+		timers = append(timers, tm)
+		return tm
+	}
+	defer func() {
+		for _, tm := range timers {
+			tm.Stop()
+		}
+	}()
+
+	if err := copyPasswordToClipboard("same-secret"); err != nil {
+		t.Fatalf("unexpected error on first copy: %v", err)
+	}
+	if err := copyPasswordToClipboard("same-secret"); err != nil {
+		t.Fatalf("unexpected error on second copy: %v", err)
+	}
+
+	if len(callbacks) != 2 {
+		t.Fatalf("expected 2 callbacks to be scheduled, got %d", len(callbacks))
+	}
+
+	// Simulate an already-fired first timer callback running after the second copy.
+	callbacks[0]()
+	if currentClipboard != "same-secret" {
+		t.Fatalf("expected stale timer callback not to clear re-copied secret, got %q", currentClipboard)
+	}
+
+	// The active second timer callback should still clear the secret.
+	callbacks[1]()
+	if currentClipboard != "" {
+		t.Fatalf("expected latest timer callback to clear clipboard, got %q", currentClipboard)
+	}
+}
+
+func TestCopyPasswordToClipboard_StaleTimerInvalidatedWhenSubsequentCopyHasDisabledTimeout(t *testing.T) {
+	resetClipboardTestState(t)
+
+	var currentClipboard string
+	writeClipboard = func(text string) error {
+		currentClipboard = text
+		return nil
+	}
+	readClipboard = func() (string, error) {
+		return currentClipboard, nil
+	}
+
+	var callbacks []func()
+	afterFunc = func(d time.Duration, f func()) *time.Timer {
+		callbacks = append(callbacks, f)
+		tm := time.NewTimer(time.Hour)
+		tm.Stop()
+		return tm
+	}
+
+	if err := copyPasswordToClipboard("same-secret"); err != nil {
+		t.Fatalf("unexpected error on first copy: %v", err)
+	}
+	if len(callbacks) != 1 {
+		t.Fatalf("expected 1 callback scheduled, got %d", len(callbacks))
+	}
+
+	// Disable timeout for the second copy of the same password.
+	clipboardClearTimeout = 0
+	if err := copyPasswordToClipboard("same-secret"); err != nil {
+		t.Fatalf("unexpected error on second copy: %v", err)
+	}
+
+	// Even if the first timer had already fired and now acquires the lock, it must not clear.
+	callbacks[0]()
+	if currentClipboard != "same-secret" {
+		t.Fatalf("expected stale timer callback not to clear secret after timeout-disabled copy, got %q", currentClipboard)
+	}
+}
+
+func TestCopyPasswordToClipboard_StaleTimerInvalidatedOnSubsequentWriteError(t *testing.T) {
+	resetClipboardTestState(t)
+
+	var currentClipboard string
+	failWrite := false
+	writeClipboard = func(text string) error {
+		if failWrite {
+			return errors.New("write failed")
+		}
+		currentClipboard = text
+		return nil
+	}
+	readReads := 0
+	readClipboard = func() (string, error) {
+		readReads++
+		return currentClipboard, nil
+	}
+
+	var scheduledFn func()
+	afterFunc = func(d time.Duration, f func()) *time.Timer {
+		scheduledFn = f
+		tm := time.NewTimer(time.Hour)
+		tm.Stop()
+		return tm
+	}
+
+	if err := copyPasswordToClipboard("same-secret"); err != nil {
+		t.Fatalf("unexpected error on first copy: %v", err)
+	}
+
+	failWrite = true
+	if err := copyPasswordToClipboard("same-secret"); err == nil {
+		t.Fatal("expected write error on second copy")
+	}
+
+	scheduledFn()
+	if readReads != 0 {
+		t.Fatalf("expected stale callback to return before reading clipboard, got %d reads", readReads)
 	}
 }
