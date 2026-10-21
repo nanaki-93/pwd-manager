@@ -23,6 +23,7 @@ var (
 
 	clipboardMu    sync.Mutex
 	clipboardTimer *time.Timer
+	clipboardToken uint64
 )
 
 func Start() {
@@ -82,6 +83,8 @@ func copyPasswordToClipboard(pwd string) error {
 	clipboardMu.Lock()
 	defer clipboardMu.Unlock()
 
+	clipboardToken++
+	token := clipboardToken
 	if clipboardTimer != nil {
 		clipboardTimer.Stop()
 		clipboardTimer = nil
@@ -98,6 +101,10 @@ func copyPasswordToClipboard(pwd string) error {
 	clipboardTimer = afterFunc(clipboardClearTimeout, func() {
 		clipboardMu.Lock()
 		defer clipboardMu.Unlock()
+
+		if clipboardToken != token {
+			return
+		}
 
 		current, err := readClipboard()
 		if err != nil {
