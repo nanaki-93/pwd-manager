@@ -62,14 +62,16 @@ func execAddCmd(cmd *cobra.Command, args []string) {
 	pwdObj, err := utils.GetPwdObjAfterCheckMaster()
 	utils.ManageErrorAndExit(err)
 
+	stdinReader := bufio.NewReader(os.Stdin)
+
 	fmt.Println("Insert new name of the password:")
-	pwdName, err := readPwdName(os.Stdin)
+	pwdName, err := readPwdName(stdinReader)
 	utils.ManageErrorAndExit(err)
 
 	if pwdObj.SavedPasswords == nil {
 		pwdObj.SavedPasswords = make(map[string]string)
 	}
-	proceed, err := canSavePassword(pwdObj.SavedPasswords, pwdName, os.Stdin)
+	proceed, err := canSavePassword(pwdObj.SavedPasswords, pwdName, stdinReader)
 	utils.ManageErrorAndExit(err)
 	if !proceed {
 		fmt.Println("Operation cancelled")

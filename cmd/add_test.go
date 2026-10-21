@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"bufio"
 	"bytes"
 	"errors"
 	"io"
@@ -92,6 +93,78 @@ func TestCanSavePasswordExistingKey(t *testing.T) {
 	}
 	if !proceed {
 		t.Fatal("expected proceed to be true when map is nil")
+	}
+}
+
+func TestSequentialPromptsWithSharedBufferedStdin(t *testing.T) {
+	tests := []struct {
+		name        string
+		input       string
+		wantPwdName string
+		wantProceed bool
+	}{
+		{
+			name:        "confirms overwrite from buffered second line",
+			input:       "github\ny\n",
+			wantPwdName: "github",
+			wantProceed: true,
+		},
+		{
+			name:        "declines overwrite from buffered second line",
+			input:       "github\nn\n",
+			wantPwdName: "github",
+			wantProceed: false,
+		},
+		{
+			name:        "confirms overwrite on unterminated second line at EOF",
+			input:       "  github  \n  Y  ",
+			wantPwdName: "github",
+			wantProceed: true,
+		},
+		{
+			name:        "declines overwrite when EOF reached before second line",
+			input:       "github\n",
+			wantPwdName: "github",
+			wantProceed: false,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			oldStdin := os.Stdin
+			r, w, err := os.Pipe()
+			if err != nil {
+				t.Fatalf("failed to create stdin pipe: %v", err)
+			}
+			os.Stdin = r
+			defer func() {
+				os.Stdin = oldStdin
+				_ = r.Close()
+			}()
+
+			if _, err := io.WriteString(w, tc.input); err != nil {
+				t.Fatalf("failed to write to pipe: %v", err)
+			}
+			_ = w.Close()
+
+			stdinReader := bufio.NewReader(os.Stdin)
+			pwdName, err := readPwdName(stdinReader)
+			if err != nil {
+				t.Fatalf("expected no error reading password name, got %v", err)
+			}
+			if pwdName != tc.wantPwdName {
+				t.Fatalf("expected password name %q, got %q", tc.wantPwdName, pwdName)
+			}
+
+			saved := map[string]string{"github": "secret"}
+			proceed, err := canSavePassword(saved, pwdName, stdinReader)
+			if err != nil {
+				t.Fatalf("expected no error reading overwrite confirmation, got %v", err)
+			}
+			if proceed != tc.wantProceed {
+				t.Fatalf("expected proceed=%v, got %v", tc.wantProceed, proceed)
+			}
+		})
 	}
 }
 
