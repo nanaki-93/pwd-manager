@@ -16,23 +16,36 @@ var removeCmd = &cobra.Command{
 	Run:   execRemoveCmd,
 }
 
-func execRemoveCmd(cmd *cobra.Command, args []string) {
+func removePassword(name string, savedPasswords map[string]string, save func() error) error {
+	if len(savedPasswords) == 0 {
+		fmt.Println("No passwords saved")
+		return nil
+	}
+	prev, ok := savedPasswords[name]
+	if !ok {
+		fmt.Printf("Password with key '%s' not found\n", name)
+		return nil
+	}
+	delete(savedPasswords, name)
+	if err := save(); err != nil {
+		savedPasswords[name] = prev
+		return fmt.Errorf("persist password removal for %q: %w", name, err)
+	}
+	fmt.Printf("%s removed\n", name)
+	return nil
+}
 
+func execRemoveCmd(cmd *cobra.Command, args []string) {
 	pwdObj, err := utils.GetPwdObjAfterCheckMaster()
 	utils.ManageErrorAndExit(err)
 
-	if len(pwdObj.SavedPasswords) == 0 {
-		fmt.Printf("No passwords saved")
-		return
-	}
-	if _, ok := pwdObj.SavedPasswords[nameFlag]; !ok {
-		fmt.Printf("Password with key '%s' not found", nameFlag)
-		return
-	}
-	delete(pwdObj.SavedPasswords, nameFlag)
-	utils.SaveFile(pwdObj, err)
-	fmt.Printf("%s removed", nameFlag)
+	err = removePassword(nameFlag, pwdObj.SavedPasswords, func() error {
+		utils.SaveFile(pwdObj, err)
+		return nil
+	})
+	utils.ManageErrorAndExit(err)
 }
+
 func init() {
 	rootCmd.AddCommand(removeCmd)
 
