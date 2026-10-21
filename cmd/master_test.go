@@ -115,7 +115,20 @@ func TestGenerateKeyWritesExpectedKeyOnSuccess(t *testing.T) {
 		t.Fatalf("expected nil error from generateKey, got: %v", err)
 	}
 
-	gotKey, err := os.ReadFile(filepath.Join(tmpHome, utils.PwdFileKey))
+	keyPath := filepath.Join(tmpHome, utils.PwdFileKey)
+	info, err := os.Stat(keyPath)
+	if err != nil {
+		t.Fatalf("failed to stat generated key file: %v", err)
+	}
+	perm := info.Mode().Perm()
+	if perm&0111 != 0 {
+		t.Fatalf("expected key file permissions to exclude execution bits for all principals, got %#o", perm)
+	}
+	if perm != 0600 {
+		t.Fatalf("expected key file permissions 0600, got %#o", perm)
+	}
+
+	gotKey, err := os.ReadFile(keyPath)
 	if err != nil {
 		t.Fatalf("failed to read generated key file: %v", err)
 	}
@@ -185,10 +198,18 @@ func TestExecMasterCmdAbortsWhenKeyGenerationFails(t *testing.T) {
 }
 
 func TestExecMasterCmdInitializesKeyAndHashedPassword(t *testing.T) {
-	_ = withTempHome(t)
+	tmpHome := withTempHome(t)
 	stubPasswordSequence(t, "first-time-secret")
 
 	execMasterCmd(masterCmd, nil)
+
+	keyInfo, err := os.Stat(filepath.Join(tmpHome, utils.PwdFileKey))
+	if err != nil {
+		t.Fatalf("expected key file to exist after initial master command, got: %v", err)
+	}
+	if perm := keyInfo.Mode().Perm(); perm != 0600 || perm&0111 != 0 {
+		t.Fatalf("expected initialized key file permissions 0600 without execution bits, got %#o", perm)
+	}
 
 	loaded, err := utils.GetPwdObj()
 	if err != nil {

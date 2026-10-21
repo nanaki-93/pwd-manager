@@ -119,7 +119,7 @@ func generateKey() error {
 		return err
 	}
 
-	err = os.WriteFile(utils.PwdFileKey, key, 0700)
+	err = os.WriteFile(utils.PwdFileKey, key, 0600)
 	if err != nil {
 		return err
 	}
