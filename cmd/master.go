@@ -4,6 +4,7 @@ Copyright © 2025 Marco Andreose <andreose.marco93@gmail.com>
 package cmd
 
 import (
+	"bytes"
 	"crypto/rand"
 	"errors"
 	"fmt"
@@ -12,7 +13,6 @@ import (
 	"github.com/spf13/cobra"
 	"io"
 	"os"
-	"strings"
 )
 
 const minMasterPasswordLen = 8
@@ -60,9 +60,15 @@ func execMasterCmd(cmd *cobra.Command, args []string) {
 func savePassword(currPwdContent model.PwdFile) {
 	var currPassword []byte
 	var newPassword []byte
+	defer func() {
+		clear(currPassword)
+		clear(newPassword)
+	}()
 	if currPwdContent.MasterPassword != "" {
 		currPassword = utils.PromptPassword("Enter your current password:")
-		if !utils.VerifyMasterPassword(currPwdContent.MasterPassword, currPassword) {
+		matched := utils.VerifyMasterPassword(currPwdContent.MasterPassword, currPassword)
+		clear(currPassword)
+		if !matched {
 			fmt.Println("Passwords do not match")
 			return
 		}
@@ -71,11 +77,13 @@ func savePassword(currPwdContent model.PwdFile) {
 	newPassword = utils.PromptPassword("Enter your new password:")
 	if newPassword != nil {
 		if err := validateMasterPassword(newPassword); err != nil {
+			clear(newPassword)
 			utils.ManageErrorAndExit(err)
 			return
 		}
 	}
 	hashedPassword, err := utils.HashMasterPassword(newPassword)
+	clear(newPassword)
 	if err != nil {
 		utils.ManageErrorAndExit(err)
 		return
@@ -89,7 +97,7 @@ func savePassword(currPwdContent model.PwdFile) {
 }
 
 func validateMasterPassword(password []byte) error {
-	trimmed := strings.TrimSpace(string(password))
+	trimmed := bytes.TrimSpace(password)
 	if len(trimmed) == 0 {
 		return errors.New("master password cannot be empty")
 	}
@@ -103,6 +111,7 @@ func generateKey() error {
 	utils.GoToHomeDir()
 	fmt.Println("Generating a key to encrypt your file:")
 	key := make([]byte, 32)
+	defer clear(key)
 
 	_, err := randRead(rand.Reader, key)
 	if err != nil {

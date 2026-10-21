@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime/debug"
 	"strings"
 	"testing"
 
@@ -42,7 +43,12 @@ func TestGenerateKeyAbortsOnRandError(t *testing.T) {
 		randRead = origRandRead
 	}()
 
+	var capturedKeyBuf []byte
 	randRead = func(r io.Reader, buf []byte) (int, error) {
+		capturedKeyBuf = buf
+		for i := range buf {
+			buf[i] = 0x5a
+		}
 		return 0, errors.New("rng failure")
 	}
 
@@ -54,10 +60,27 @@ func TestGenerateKeyAbortsOnRandError(t *testing.T) {
 	if _, statErr := os.Stat(filepath.Join(tmpHome, utils.PwdFileKey)); !errors.Is(statErr, os.ErrNotExist) {
 		t.Fatalf("expected key file not to be written on rng error, stat err: %v", statErr)
 	}
+	if !bytes.Equal(capturedKeyBuf, make([]byte, len(capturedKeyBuf))) {
+		t.Fatalf("expected key buffer to be zeroed on rng error, got %x", capturedKeyBuf)
+	}
 }
 
 func TestGenerateKeyReturnsErrorOnWriteFailure(t *testing.T) {
 	tmpHome := withTempHome(t)
+
+	origRandRead := randRead
+	defer func() {
+		randRead = origRandRead
+	}()
+
+	var capturedKeyBuf []byte
+	randRead = func(r io.Reader, buf []byte) (int, error) {
+		capturedKeyBuf = buf
+		for i := range buf {
+			buf[i] = 0xee
+		}
+		return len(buf), nil
+	}
 
 	// Create a directory at the key file path so os.WriteFile fails.
 	if err := os.Mkdir(filepath.Join(tmpHome, utils.PwdFileKey), 0700); err != nil {
@@ -66,6 +89,9 @@ func TestGenerateKeyReturnsErrorOnWriteFailure(t *testing.T) {
 
 	if err := generateKey(); err == nil {
 		t.Fatalf("expected error when writing key file fails, got nil")
+	}
+	if !bytes.Equal(capturedKeyBuf, make([]byte, len(capturedKeyBuf))) {
+		t.Fatalf("expected key buffer to be zeroed on write error, got %x", capturedKeyBuf)
 	}
 }
 
@@ -78,7 +104,9 @@ func TestGenerateKeyWritesExpectedKeyOnSuccess(t *testing.T) {
 	}()
 
 	expectedKey := bytes.Repeat([]byte{0xab}, 32)
+	var capturedKeyBuf []byte
 	randRead = func(r io.Reader, buf []byte) (int, error) {
+		capturedKeyBuf = buf
 		copy(buf, expectedKey)
 		return len(buf), nil
 	}
@@ -93,6 +121,9 @@ func TestGenerateKeyWritesExpectedKeyOnSuccess(t *testing.T) {
 	}
 	if !bytes.Equal(gotKey, expectedKey) {
 		t.Fatalf("generated key mismatch: got %x, want %x", gotKey, expectedKey)
+	}
+	if !bytes.Equal(capturedKeyBuf, make([]byte, len(capturedKeyBuf))) {
+		t.Fatalf("expected in-memory key buffer to be zeroed after generateKey, got %x", capturedKeyBuf)
 	}
 }
 
@@ -545,6 +576,84 @@ func TestSavePasswordRotationAndPromptError(t *testing.T) {
 	}
 	if afterPromptErr.MasterPassword != afterRotate.MasterPassword {
 		t.Fatalf("expected master password hash to remain unchanged after prompt failure")
+	}
+}
+
+func fillSyntheticSecret(dst []byte, seed byte) {
+	for i := range dst {
+		dst[i] = byte('!' + (int(seed)+i*13)%90)
+	}
+}
+
+func TestSavePasswordZeroesPasswordBuffersAndHeapSnapshot(t *testing.T) {
+	tmpHome := withTempHome(t)
+	keyPath := filepath.Join(tmpHome, utils.PwdFileKey)
+	if err := os.WriteFile(keyPath, bytes.Repeat([]byte{0x77}, 32), 0700); err != nil {
+		t.Fatalf("failed to write key file: %v", err)
+	}
+
+	var buffers [][]byte
+	seeds := []byte{11, 29, 11, 47, 11, 83}
+	lens := []int{24, 24, 24, 5, 24, 24}
+	idx := 0
+	restoreReader := utils.SetReadPasswordStdin(func() ([]byte, error) {
+		if idx >= len(seeds) {
+			return nil, errors.New("unexpected password prompt")
+		}
+		buf := make([]byte, lens[idx])
+		fillSyntheticSecret(buf, seeds[idx])
+		idx++
+		buffers = append(buffers, buf)
+		return buf, nil
+	})
+	defer restoreReader()
+
+	// 1. Initial password creation.
+	savePassword(model.PwdFile{})
+	persisted, err := utils.GetPwdObj()
+	if err != nil {
+		t.Fatalf("failed to load initial password file: %v", err)
+	}
+
+	// 2. Mismatched current password.
+	savePassword(persisted)
+
+	// 3. Weak new password after valid current password.
+	savePassword(persisted)
+
+	// 4. Successful password rotation.
+	savePassword(persisted)
+
+	dumpPath := filepath.Join(tmpHome, "heap.dump")
+	dumpFile, err := os.Create(dumpPath)
+	if err != nil {
+		t.Fatalf("failed to create heap dump file: %v", err)
+	}
+	debug.WriteHeapDump(dumpFile.Fd())
+	if err := dumpFile.Close(); err != nil {
+		t.Fatalf("failed to close heap dump file: %v", err)
+	}
+
+	if len(buffers) != len(seeds) {
+		t.Fatalf("expected %d password prompts, got %d", len(seeds), len(buffers))
+	}
+	for i, buf := range buffers {
+		if !bytes.Equal(buf, make([]byte, len(buf))) {
+			t.Fatalf("expected password buffer %d to be zeroed in memory, got %x", i, buf)
+		}
+	}
+
+	dumpBytes, err := os.ReadFile(dumpPath)
+	if err != nil {
+		t.Fatalf("failed to read heap dump: %v", err)
+	}
+	for _, seed := range []byte{11, 29, 83} {
+		probe := make([]byte, 24)
+		fillSyntheticSecret(probe, seed)
+		if bytes.Contains(dumpBytes, probe) {
+			t.Fatalf("found raw secret for seed %d in runtime heap snapshot", seed)
+		}
+		clear(probe)
 	}
 }
 
