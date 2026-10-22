@@ -539,20 +539,35 @@ func TestSavePasswordRejectsNilReaderSlice(t *testing.T) {
 	tmpHome := withTempHome(t)
 	writeTestKey(t, tmpHome, 0x77)
 
+	if err := validateMasterPassword(nil); err == nil || !strings.Contains(err.Error(), "master password cannot be empty") {
+		t.Fatalf("validateMasterPassword(nil) = %v, want empty master password error", err)
+	}
+
+	origRandRead := randRead
+	defer func() { randRead = origRandRead }()
+	keyGenCalled := false
+	randRead = func(r io.Reader, buf []byte) (int, error) {
+		keyGenCalled = true
+		return len(buf), nil
+	}
+
 	restoreReader := utils.SetReadPasswordStdin(func() ([]byte, error) { return nil, nil })
 	defer restoreReader()
 
-	exitCalled := false
+	exitCount := 0
 	restoreExit := utils.SetExitFunc(func(code int) {
 		if code != 0 {
-			exitCalled = true
+			exitCount++
 		}
 	})
 	savePassword(model.PwdFile{})
 	restoreExit()
 
-	if !exitCalled {
-		t.Fatalf("expected ManageErrorAndExit to be called when reader returns (nil, nil)")
+	if exitCount != 1 {
+		t.Fatalf("expected ManageErrorAndExit to be called once on validation failure when reader returns (nil, nil), got %d", exitCount)
+	}
+	if keyGenCalled {
+		t.Fatalf("expected key generation not to run when new password slice is nil")
 	}
 	if _, statErr := os.Stat(filepath.Join(tmpHome, utils.PwdFileName)); !errors.Is(statErr, os.ErrNotExist) {
 		t.Fatalf("expected password file not to be written when reader returns (nil, nil), stat err: %v", statErr)

@@ -81,12 +81,10 @@ func savePassword(currPwdContent model.PwdFile) {
 	}
 
 	newPassword = utils.PromptPassword("Enter your new password:")
-	if newPassword != nil {
-		if err := validateMasterPassword(newPassword); err != nil {
-			clear(newPassword)
-			utils.ManageErrorAndExit(err)
-			return
-		}
+	if err := validateMasterPassword(newPassword); err != nil {
+		clear(newPassword)
+		utils.ManageErrorAndExit(err)
+		return
 	}
 	hashedPassword, err := utils.HashMasterPassword(newPassword)
 	if err != nil {
