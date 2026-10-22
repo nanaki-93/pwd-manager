@@ -4,6 +4,7 @@ Copyright © 2025 Marco Andreose <andreose.marco93@gmail.com>
 package utils
 
 import (
+	"bytes"
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/hmac"
@@ -18,6 +19,7 @@ import (
 	"io"
 	"os"
 	"strings"
+	"sync"
 	"syscall"
 
 	"github.com/nanaki-93/pwd-manager/internal/model"
@@ -32,13 +34,50 @@ const (
 	saltSize       = 16
 	pbkdf2Iter     = 100000
 	derivedKeySize = 32
+	v2Magic        = "PWD2"
 )
 
 var (
 	exitFunc          = os.Exit
 	randRead          = io.ReadFull
 	readPasswordStdin = func() ([]byte, error) { return terminal.ReadPassword(int(syscall.Stdin)) }
+
+	errDecryptFailed = errors.New("decrypt file err")
+
+	masterKeyMu      sync.RWMutex
+	sessionMasterKey []byte
 )
+
+// SetMasterKey sets the active master password in memory for deriving the store encryption key.
+func SetMasterKey(password []byte) {
+	masterKeyMu.Lock()
+	defer masterKeyMu.Unlock()
+	for i := range sessionMasterKey {
+		sessionMasterKey[i] = 0
+	}
+	if len(password) == 0 {
+		sessionMasterKey = nil
+		return
+	}
+	sessionMasterKey = append([]byte(nil), password...)
+}
+
+func getMasterKey() []byte {
+	masterKeyMu.RLock()
+	defer masterKeyMu.RUnlock()
+	if len(sessionMasterKey) == 0 {
+		return nil
+	}
+	return append([]byte(nil), sessionMasterKey...)
+}
+
+func deriveEncryptionKey(secret, salt []byte) []byte {
+	domainSalt := make([]byte, 0, len(salt)+len("enc-v2")+1)
+	domainSalt = append(domainSalt, salt...)
+	domainSalt = append(domainSalt, ':')
+	domainSalt = append(domainSalt, "enc-v2"...)
+	return pbkdf2SHA256(secret, domainSalt, pbkdf2Iter, derivedKeySize)
+}
 
 // SetExitFunc overrides the process termination function for testing and returns a restore callback.
 func SetExitFunc(fn func(int)) func() {
@@ -135,34 +174,58 @@ func encryptFile(content []byte) error {
 	if err := chdirHome(); err != nil {
 		return err
 	}
-	// Reading key
+	secret := getMasterKey()
+	if len(secret) > 0 {
+		return encryptFileWithSecret(content, secret)
+	}
 	key, err := os.ReadFile(PwdFileKey)
 	if err != nil {
 		return fmt.Errorf("read key file: %w", err)
 	}
+	return encryptFileWithRawKey(content, key, nil)
+}
 
-	// Creating block of algorithm
+func encryptFileWithSecret(content, secret []byte) error {
+	salt := make([]byte, saltSize)
+	if _, err := randRead(rand.Reader, salt); err != nil {
+		return fmt.Errorf("generate salt: %w", err)
+	}
+	key := deriveEncryptionKey(secret, salt)
+	defer func() {
+		for i := range key {
+			key[i] = 0
+		}
+	}()
+	prefix := make([]byte, 0, len(v2Magic)+saltSize)
+	prefix = append(prefix, v2Magic...)
+	prefix = append(prefix, salt...)
+	if err := encryptFileWithRawKey(content, key, prefix); err != nil {
+		return err
+	}
+	_ = os.Remove(PwdFileKey)
+	return nil
+}
+
+func encryptFileWithRawKey(content, key, prefix []byte) error {
 	block, err := aes.NewCipher(key)
 	if err != nil {
 		return fmt.Errorf("cipher init: %w", err)
 	}
-
-	// Creating GCM mode
 	gcm, err := cipher.NewGCM(block)
 	if err != nil {
 		return fmt.Errorf("cipher GCM init: %w", err)
 	}
-
-	// Generating random nonce
 	nonce := make([]byte, gcm.NonceSize())
 	if _, err := randRead(rand.Reader, nonce); err != nil {
 		return fmt.Errorf("generate nonce: %w", err)
 	}
-
-	// Encrypt file
 	cipherText := gcm.Seal(nonce, nonce, content, nil)
-
-	// Writing ciphertext file
+	if len(prefix) > 0 {
+		out := make([]byte, 0, len(prefix)+len(cipherText))
+		out = append(out, prefix...)
+		out = append(out, cipherText...)
+		cipherText = out
+	}
 	if err := os.WriteFile(PwdFileName, cipherText, 0700); err != nil {
 		return fmt.Errorf("write encrypted file: %w", err)
 	}
@@ -187,42 +250,56 @@ func readPwdFile() ([]byte, error) {
 	if err := chdirHome(); err != nil {
 		return nil, err
 	}
-	// Reading ciphertext file
 	cipherText, err := os.ReadFile(PwdFileName)
 	if err != nil {
 		return nil, err
 	}
-
-	// Reading key
+	if bytes.HasPrefix(cipherText, []byte(v2Magic)) {
+		return decryptV2(cipherText[len(v2Magic):])
+	}
 	key, err := os.ReadFile(PwdFileKey)
 	if err != nil {
 		return nil, err
 	}
+	return decryptWithKey(cipherText, key)
+}
 
-	// Creating block of algorithm
+func decryptV2(payload []byte) ([]byte, error) {
+	if len(payload) < saltSize {
+		return nil, errors.New("ciphertext too short")
+	}
+	secret := getMasterKey()
+	if len(secret) == 0 {
+		return nil, errors.New("master password required to decrypt store")
+	}
+	salt := payload[:saltSize]
+	key := deriveEncryptionKey(secret, salt)
+	defer func() {
+		for i := range key {
+			key[i] = 0
+		}
+	}()
+	return decryptWithKey(payload[saltSize:], key)
+}
+
+func decryptWithKey(cipherText, key []byte) ([]byte, error) {
 	block, err := aes.NewCipher(key)
 	if err != nil {
 		return nil, fmt.Errorf("cipher err: %w", err)
 	}
-
-	// Creating GCM mode
 	gcm, err := cipher.NewGCM(block)
 	if err != nil {
 		return nil, fmt.Errorf("cipher GCM err: %w", err)
 	}
-
 	if len(cipherText) < gcm.NonceSize() {
 		return nil, errors.New("ciphertext too short")
 	}
-
-	// Detached nonce and decrypt
 	nonce := cipherText[:gcm.NonceSize()]
 	cipherText = cipherText[gcm.NonceSize():]
 	plainText, err := gcm.Open(nil, nonce, cipherText, nil)
 	if err != nil {
-		return nil, fmt.Errorf("decrypt file err: %w", err)
+		return nil, fmt.Errorf("%w: %w", errDecryptFailed, err)
 	}
-
 	return plainText, nil
 }
 
@@ -297,13 +374,27 @@ func ManageErrorAndExit(err error) {
 }
 
 func GetPwdObjAfterCheckMaster() (model.PwdFile, error) {
-	pwdObj, err := GetPwdObj()
-	if err != nil {
+	if err := chdirHome(); err != nil {
+		ManageErrorAndExit(err)
+		return model.PwdFile{}, err
+	}
+	if _, err := os.Stat(PwdFileName); err != nil {
 		ManageErrorAndExit(err)
 		return model.PwdFile{}, err
 	}
 	pwd := PromptPassword("Enter your master password:")
+	SetMasterKey(pwd)
+	pwdObj, err := GetPwdObj()
+	if err != nil {
+		SetMasterKey(nil)
+		if errors.Is(err, errDecryptFailed) {
+			return model.PwdFile{}, fmt.Errorf("master passwords do not match")
+		}
+		ManageErrorAndExit(err)
+		return model.PwdFile{}, err
+	}
 	if !VerifyMasterPassword(pwdObj.MasterPassword, pwd) {
+		SetMasterKey(nil)
 		return model.PwdFile{}, fmt.Errorf("master passwords do not match")
 	}
 	return pwdObj, nil

@@ -9,10 +9,14 @@ import (
 	"crypto/sha256"
 	"encoding/binary"
 	"encoding/hex"
+	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/nanaki-93/pwd-manager/internal/model"
 	"golang.org/x/crypto/pbkdf2"
 )
 
@@ -245,6 +249,184 @@ func pbkdf2SHA256ReusedHMAC(password, salt []byte, iter, keyLen int) []byte {
 		dk = append(dk, t...)
 	}
 	return dk[:keyLen]
+}
+
+func withTempHome(t *testing.T) string {
+	t.Helper()
+	origWd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	tmpHome := t.TempDir()
+	t.Setenv("HOME", tmpHome)
+	t.Cleanup(func() {
+		SetMasterKey(nil)
+		_ = os.Chdir(origWd)
+	})
+	return tmpHome
+}
+
+func TestV2EncryptionLifecycle_RequiresMasterPasswordAndRemovesKeyFile(t *testing.T) {
+	tmpHome := withTempHome(t)
+	masterSecret := []byte("correct-horse-battery-staple")
+	hashed, err := HashMasterPassword(masterSecret)
+	if err != nil {
+		t.Fatalf("HashMasterPassword: %v", err)
+	}
+
+	legacyKeyPath := filepath.Join(tmpHome, PwdFileKey)
+	if err := os.WriteFile(legacyKeyPath, bytes.Repeat([]byte{"k"[0]}, 32), 0600); err != nil {
+		t.Fatalf("write legacy key file: %v", err)
+	}
+
+	SetMasterKey(masterSecret)
+	if err := SaveFileErr(model.PwdFile{MasterPassword: hashed}, nil); err != nil {
+		t.Fatalf("SaveFileErr failed: %v", err)
+	}
+
+	if _, err := os.Stat(legacyKeyPath); !os.IsNotExist(err) {
+		t.Fatalf("expected plaintext key file %s to be removed after v2 encryption, stat err: %v", legacyKeyPath, err)
+	}
+
+	rawStore, err := os.ReadFile(filepath.Join(tmpHome, PwdFileName))
+	if err != nil {
+		t.Fatalf("read encrypted store: %v", err)
+	}
+	if !bytes.HasPrefix(rawStore, []byte(v2Magic)) {
+		t.Fatalf("expected encrypted store to start with %q magic header", v2Magic)
+	}
+
+	SetMasterKey(nil)
+	if _, err := GetPwdObj(); err == nil || !strings.Contains(err.Error(), "master password required") {
+		t.Fatalf("expected decryption without master password to fail with 'master password required', got %v", err)
+	}
+
+	SetMasterKey([]byte("wrong-master-password"))
+	if _, err := GetPwdObj(); err == nil || !errors.Is(err, errDecryptFailed) {
+		t.Fatalf("expected decryption with wrong master password to fail with errDecryptFailed, got %v", err)
+	}
+
+	SetMasterKey(masterSecret)
+	got, err := GetPwdObj()
+	if err != nil {
+		t.Fatalf("GetPwdObj with correct master password failed: %v", err)
+	}
+	if got.MasterPassword != hashed {
+		t.Fatalf("GetPwdObj MasterPassword = %q, want %q", got.MasterPassword, hashed)
+	}
+}
+
+func TestGetPwdObjAfterCheckMaster_PromptsBeforeDecryptAndRejectsWrongPassword(t *testing.T) {
+	withTempHome(t)
+	masterSecret := []byte("vault-master-secret")
+	hashed, err := HashMasterPassword(masterSecret)
+	if err != nil {
+		t.Fatalf("HashMasterPassword: %v", err)
+	}
+
+	SetMasterKey(masterSecret)
+	if err := SaveFileErr(model.PwdFile{MasterPassword: hashed}, nil); err != nil {
+		t.Fatalf("SaveFileErr: %v", err)
+	}
+	SetMasterKey(nil)
+
+	exited := false
+	restoreExit := SetExitFunc(func(code int) {
+		exited = true
+	})
+	defer restoreExit()
+
+	restoreStdin := SetReadPasswordStdin(func() ([]byte, error) {
+		return []byte("wrong-password"), nil
+	})
+	defer restoreStdin()
+
+	_, err = GetPwdObjAfterCheckMaster()
+	if err == nil || !strings.Contains(err.Error(), "master passwords do not match") {
+		t.Fatalf("expected master passwords do not match error, got %v", err)
+	}
+	if exited {
+		t.Fatalf("expected wrong master password not to invoke exitFunc")
+	}
+	if getMasterKey() != nil {
+		t.Fatalf("expected session master key to be cleared after failed verification")
+	}
+
+	restoreStdinCorrect := SetReadPasswordStdin(func() ([]byte, error) {
+		return masterSecret, nil
+	})
+	defer restoreStdinCorrect()
+
+	pwdObj, err := GetPwdObjAfterCheckMaster()
+	if err != nil {
+		t.Fatalf("GetPwdObjAfterCheckMaster with valid password failed: %v", err)
+	}
+	if pwdObj.MasterPassword != hashed {
+		t.Fatalf("unexpected MasterPassword hash: got %q, want %q", pwdObj.MasterPassword, hashed)
+	}
+	if !bytes.Equal(getMasterKey(), masterSecret) {
+		t.Fatalf("expected session master key to remain set after successful unlock")
+	}
+}
+
+func TestGetPwdObjAfterCheckMaster_RejectsMismatchedStoredHash(t *testing.T) {
+	withTempHome(t)
+	encryptionSecret := []byte("encryption-secret")
+	otherHash, err := HashMasterPassword([]byte("different-stored-hash-secret"))
+	if err != nil {
+		t.Fatalf("HashMasterPassword: %v", err)
+	}
+
+	SetMasterKey(encryptionSecret)
+	if err := SaveFileErr(model.PwdFile{MasterPassword: otherHash}, nil); err != nil {
+		t.Fatalf("SaveFileErr: %v", err)
+	}
+	SetMasterKey(nil)
+
+	restoreStdin := SetReadPasswordStdin(func() ([]byte, error) {
+		return encryptionSecret, nil
+	})
+	defer restoreStdin()
+
+	if _, err := GetPwdObjAfterCheckMaster(); err == nil || !strings.Contains(err.Error(), "master passwords do not match") {
+		t.Fatalf("expected mismatch error when stored hash differs from encryption secret, got %v", err)
+	}
+	if getMasterKey() != nil {
+		t.Fatalf("expected session master key to be cleared when VerifyMasterPassword fails")
+	}
+}
+
+func TestDecryptV2_BoundaryInputs(t *testing.T) {
+	SetMasterKey([]byte("boundary-test-secret"))
+	defer SetMasterKey(nil)
+
+	if _, err := decryptV2(make([]byte, saltSize-1)); err == nil || !strings.Contains(err.Error(), "ciphertext too short") {
+		t.Fatalf("expected ciphertext too short for payload smaller than saltSize, got %v", err)
+	}
+
+	if _, err := decryptV2(make([]byte, saltSize+4)); err == nil || !strings.Contains(err.Error(), "ciphertext too short") {
+		t.Fatalf("expected ciphertext too short for payload with truncated GCM nonce, got %v", err)
+	}
+}
+
+func TestSetMasterKey_IsolationAndClear(t *testing.T) {
+	raw := []byte("mutable-secret")
+	SetMasterKey(raw)
+	raw[0] = 'X'
+
+	got := getMasterKey()
+	if string(got) != "mutable-secret" {
+		t.Fatalf("expected SetMasterKey to copy input slice, got %q", got)
+	}
+	got[0] = 'Y'
+	if string(getMasterKey()) != "mutable-secret" {
+		t.Fatalf("expected getMasterKey to return a copy, got %q", getMasterKey())
+	}
+
+	SetMasterKey([]byte{})
+	if getMasterKey() != nil {
+		t.Fatalf("expected empty slice to clear session master key, got %v", getMasterKey())
+	}
 }
 
 func BenchmarkPBKDF2SHA256(b *testing.B) {
