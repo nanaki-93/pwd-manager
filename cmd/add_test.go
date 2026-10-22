@@ -207,6 +207,7 @@ func TestSavePasswordWhenMasterPasswordEmpty(t *testing.T) {
 
 	tmpHome := t.TempDir()
 	t.Setenv("HOME", tmpHome)
+	stubPasswordSequence(t, "valid-master-password")
 
 	oldStdout := os.Stdout
 	r, w, err := os.Pipe()
