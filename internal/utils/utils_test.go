@@ -429,6 +429,183 @@ func TestSetMasterKey_IsolationAndClear(t *testing.T) {
 	}
 }
 
+func TestFileOperations_PreserveWorkingDirAndEnforcePermissions(t *testing.T) {
+	tmpHome := withTempHome(t)
+	workDir := t.TempDir()
+	if err := os.Chdir(workDir); err != nil {
+		t.Fatalf("chdir workDir: %v", err)
+	}
+	expectedWd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+
+	masterSecret := []byte("cwd-and-perm-secret")
+	hashed, err := HashMasterPassword(masterSecret)
+	if err != nil {
+		t.Fatalf("HashMasterPassword: %v", err)
+	}
+	SetMasterKey(masterSecret)
+
+	if err := SaveFileErr(model.PwdFile{MasterPassword: hashed}, nil); err != nil {
+		t.Fatalf("SaveFileErr: %v", err)
+	}
+
+	afterSaveWd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd after save: %v", err)
+	}
+	if afterSaveWd != expectedWd {
+		t.Fatalf("SaveFileErr changed working directory: got %q, want %q", afterSaveWd, expectedWd)
+	}
+
+	storePath := filepath.Join(tmpHome, PwdFileName)
+	fi, err := os.Lstat(storePath)
+	if err != nil {
+		t.Fatalf("lstat store: %v", err)
+	}
+	if gotPerm := fi.Mode().Perm(); gotPerm != sensitivePerm {
+		t.Fatalf("store file permissions = %04o, want %04o", gotPerm, sensitivePerm)
+	}
+
+	entries, err := os.ReadDir(tmpHome)
+	if err != nil {
+		t.Fatalf("readdir home: %v", err)
+	}
+	if len(entries) != 1 || entries[0].Name() != PwdFileName {
+		t.Fatalf("unexpected files in home dir after atomic write: %v", entries)
+	}
+
+	restoreStdin := SetReadPasswordStdin(func() ([]byte, error) {
+		return masterSecret, nil
+	})
+	defer restoreStdin()
+
+	if _, err := GetPwdObjAfterCheckMaster(); err != nil {
+		t.Fatalf("GetPwdObjAfterCheckMaster: %v", err)
+	}
+	afterReadWd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd after read: %v", err)
+	}
+	if afterReadWd != expectedWd {
+		t.Fatalf("GetPwdObjAfterCheckMaster changed working directory: got %q, want %q", afterReadWd, expectedWd)
+	}
+}
+
+func assertStoreSymlinkRejected(t *testing.T, storePath, externalTarget string) {
+	t.Helper()
+	if err := os.Symlink(externalTarget, storePath); err != nil {
+		t.Fatalf("symlink store: %v", err)
+	}
+	defer func() {
+		_ = os.Remove(storePath)
+	}()
+
+	SetMasterKey([]byte("symlink-test-secret"))
+	if err := SaveFileErr(model.PwdFile{MasterPassword: "hash"}, nil); !errors.Is(err, ErrSymlink) {
+		t.Fatalf("expected SaveFileErr on symlink store to fail with ErrSymlink, got %v", err)
+	}
+
+	externalContent, err := os.ReadFile(externalTarget)
+	if err != nil {
+		t.Fatalf("read external target: %v", err)
+	}
+	if string(externalContent) != "original-external-content" {
+		t.Fatalf("symlink target was modified: got %q", externalContent)
+	}
+
+	if _, err := GetPwdObj(); !errors.Is(err, ErrSymlink) {
+		t.Fatalf("expected GetPwdObj on symlink store to fail with ErrSymlink, got %v", err)
+	}
+
+	exited := false
+	restoreExit := SetExitFunc(func(code int) {
+		exited = true
+	})
+	defer restoreExit()
+	if _, err := GetPwdObjAfterCheckMaster(); !errors.Is(err, ErrSymlink) || !exited {
+		t.Fatalf("expected GetPwdObjAfterCheckMaster on symlink store to exit and return ErrSymlink, got err=%v exited=%v", err, exited)
+	}
+}
+
+func assertStoreNonRegularRejected(t *testing.T, storePath string) {
+	t.Helper()
+	if err := os.Mkdir(storePath, 0700); err != nil {
+		t.Fatalf("mkdir store path: %v", err)
+	}
+	defer func() {
+		_ = os.Remove(storePath)
+	}()
+
+	SetMasterKey([]byte("nonregular-test-secret"))
+	if err := SaveFileErr(model.PwdFile{MasterPassword: "hash"}, nil); !errors.Is(err, ErrNonRegular) {
+		t.Fatalf("expected SaveFileErr on directory store path to fail with ErrNonRegular, got %v", err)
+	}
+	if _, err := GetPwdObj(); !errors.Is(err, ErrNonRegular) {
+		t.Fatalf("expected GetPwdObj on directory store path to fail with ErrNonRegular, got %v", err)
+	}
+}
+
+func assertKeySymlinkRejected(t *testing.T, keyPath, externalTarget string) {
+	t.Helper()
+	if err := os.Symlink(externalTarget, keyPath); err != nil {
+		t.Fatalf("symlink key file: %v", err)
+	}
+	defer func() {
+		_ = os.Remove(keyPath)
+	}()
+
+	SetMasterKey([]byte("symlink-key-secret"))
+	if err := SaveFileErr(model.PwdFile{MasterPassword: "hash"}, nil); !errors.Is(err, ErrSymlink) {
+		t.Fatalf("expected v2 SaveFileErr to refuse removing symlink key file with ErrSymlink, got %v", err)
+	}
+
+	SetMasterKey(nil)
+	if err := SaveFileErr(model.PwdFile{MasterPassword: "hash"}, nil); !errors.Is(err, ErrSymlink) {
+		t.Fatalf("expected legacy SaveFileErr to refuse reading symlink key file with ErrSymlink, got %v", err)
+	}
+}
+
+func TestSensitiveFileOperations_RejectSymlinksAndNonRegularFiles(t *testing.T) {
+	tmpHome := withTempHome(t)
+	targetDir := t.TempDir()
+	externalTarget := filepath.Join(targetDir, "target-file")
+	if err := os.WriteFile(externalTarget, []byte("original-external-content"), 0600); err != nil {
+		t.Fatalf("write external target: %v", err)
+	}
+
+	storePath := filepath.Join(tmpHome, PwdFileName)
+	assertStoreSymlinkRejected(t, storePath, externalTarget)
+	assertStoreNonRegularRejected(t, storePath)
+
+	keyPath := filepath.Join(tmpHome, PwdFileKey)
+	assertKeySymlinkRejected(t, keyPath, externalTarget)
+}
+
+func TestResolveHomePath_BoundaryInputs(t *testing.T) {
+	tmpHome := withTempHome(t)
+
+	for _, invalid := range []string{"", "../evil", "sub/file", "/abs/path"} {
+		if _, err := resolveHomePath(invalid); err == nil {
+			t.Fatalf("expected resolveHomePath(%q) to fail, got nil", invalid)
+		}
+	}
+
+	got, err := resolveHomePath(PwdFileName)
+	if err != nil {
+		t.Fatalf("resolveHomePath(%q) failed: %v", PwdFileName, err)
+	}
+	absHome, err := filepath.Abs(tmpHome)
+	if err != nil {
+		t.Fatalf("abs home: %v", err)
+	}
+	want := filepath.Join(absHome, PwdFileName)
+	if got != want {
+		t.Fatalf("resolveHomePath(%q) = %q, want %q", PwdFileName, got, want)
+	}
+}
+
 func BenchmarkPBKDF2SHA256(b *testing.B) {
 	password := []byte("benchmark-password")
 	salt := make([]byte, saltSize)

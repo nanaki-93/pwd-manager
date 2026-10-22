@@ -18,6 +18,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"syscall"
@@ -35,6 +36,7 @@ const (
 	pbkdf2Iter     = 100000
 	derivedKeySize = 32
 	v2Magic        = "PWD2"
+	sensitivePerm  = 0600
 )
 
 var (
@@ -43,6 +45,8 @@ var (
 	readPasswordStdin = func() ([]byte, error) { return terminal.ReadPassword(int(syscall.Stdin)) }
 
 	errDecryptFailed = errors.New("decrypt file err")
+	ErrSymlink       = errors.New("refusing to access symlink")
+	ErrNonRegular    = errors.New("refusing to access non-regular file")
 
 	masterKeyMu      sync.RWMutex
 	sessionMasterKey []byte
@@ -170,15 +174,132 @@ func pbkdf2SHA256(password, salt []byte, iter, keyLen int) []byte {
 	return dk[:keyLen]
 }
 
-func encryptFile(content []byte) error {
-	if err := chdirHome(); err != nil {
+func resolveHomePath(name string) (string, error) {
+	if name == "" || filepath.Base(name) != name {
+		return "", fmt.Errorf("invalid file name %q", name)
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", fmt.Errorf("resolve home dir: %w", err)
+	}
+	absHome, err := filepath.Abs(home)
+	if err != nil {
+		return "", fmt.Errorf("resolve absolute home dir: %w", err)
+	}
+	return filepath.Join(absHome, name), nil
+}
+
+func lstatRegularFile(path string) (os.FileInfo, error) {
+	fi, err := os.Lstat(path)
+	if err != nil {
+		return nil, err
+	}
+	if fi.Mode()&os.ModeSymlink != 0 {
+		return nil, fmt.Errorf("%w: %s", ErrSymlink, path)
+	}
+	if !fi.Mode().IsRegular() {
+		return nil, fmt.Errorf("%w: %s", ErrNonRegular, path)
+	}
+	return fi, nil
+}
+
+func ensureRegularOrMissing(path string) error {
+	_, err := lstatRegularFile(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	return err
+}
+
+func readSensitiveFile(path string) ([]byte, error) {
+	fi, err := lstatRegularFile(path)
+	if err != nil {
+		return nil, err
+	}
+	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
+	if err != nil {
+		return nil, err
+	}
+	defer func() {
+		_ = f.Close()
+	}()
+	st, err := f.Stat()
+	if err != nil {
+		return nil, err
+	}
+	if !st.Mode().IsRegular() || !os.SameFile(fi, st) {
+		return nil, fmt.Errorf("%w: %s", ErrNonRegular, path)
+	}
+	return io.ReadAll(f)
+}
+
+func writeTempSensitiveFile(tmpFile *os.File, content []byte) error {
+	if err := tmpFile.Chmod(sensitivePerm); err != nil {
+		_ = tmpFile.Close()
+		return fmt.Errorf("chmod temp file: %w", err)
+	}
+	if _, err := tmpFile.Write(content); err != nil {
+		_ = tmpFile.Close()
+		return fmt.Errorf("write temp file: %w", err)
+	}
+	if err := tmpFile.Sync(); err != nil {
+		_ = tmpFile.Close()
+		return fmt.Errorf("sync temp file: %w", err)
+	}
+	if err := tmpFile.Close(); err != nil {
+		return fmt.Errorf("close temp file: %w", err)
+	}
+	return nil
+}
+
+func writeSensitiveFileAtomic(path string, content []byte) error {
+	if err := ensureRegularOrMissing(path); err != nil {
 		return err
 	}
+	tmpFile, err := os.CreateTemp(filepath.Dir(path), filepath.Base(path)+".tmp-*")
+	if err != nil {
+		return fmt.Errorf("create temp file: %w", err)
+	}
+	tmpName := tmpFile.Name()
+	cleanup := true
+	defer func() {
+		if cleanup {
+			_ = os.Remove(tmpName)
+		}
+	}()
+	if err := writeTempSensitiveFile(tmpFile, content); err != nil {
+		return err
+	}
+	if err := ensureRegularOrMissing(path); err != nil {
+		return err
+	}
+	if err := os.Rename(tmpName, path); err != nil {
+		return fmt.Errorf("rename temp file: %w", err)
+	}
+	cleanup = false
+	return nil
+}
+
+func removeSensitiveFileIfPresent(path string) error {
+	if err := ensureRegularOrMissing(path); err != nil {
+		return err
+	}
+	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("remove file: %w", err)
+	}
+	return nil
+}
+
+func encryptFile(content []byte) error {
 	secret := getMasterKey()
 	if len(secret) > 0 {
 		return encryptFileWithSecret(content, secret)
 	}
-	key, err := os.ReadFile(PwdFileKey)
+	keyPath, err := resolveHomePath(PwdFileKey)
+	if err != nil {
+		return err
+	}
+	key, err := readSensitiveFile(keyPath)
 	if err != nil {
 		return fmt.Errorf("read key file: %w", err)
 	}
@@ -202,8 +323,11 @@ func encryptFileWithSecret(content, secret []byte) error {
 	if err := encryptFileWithRawKey(content, key, prefix); err != nil {
 		return err
 	}
-	_ = os.Remove(PwdFileKey)
-	return nil
+	keyPath, err := resolveHomePath(PwdFileKey)
+	if err != nil {
+		return err
+	}
+	return removeSensitiveFileIfPresent(keyPath)
 }
 
 func encryptFileWithRawKey(content, key, prefix []byte) error {
@@ -226,7 +350,11 @@ func encryptFileWithRawKey(content, key, prefix []byte) error {
 		out = append(out, cipherText...)
 		cipherText = out
 	}
-	if err := os.WriteFile(PwdFileName, cipherText, 0700); err != nil {
+	pwdPath, err := resolveHomePath(PwdFileName)
+	if err != nil {
+		return err
+	}
+	if err := writeSensitiveFileAtomic(pwdPath, cipherText); err != nil {
 		return fmt.Errorf("write encrypted file: %w", err)
 	}
 	return nil
@@ -247,17 +375,22 @@ func GoToHomeDir() {
 }
 
 func readPwdFile() ([]byte, error) {
-	if err := chdirHome(); err != nil {
+	pwdPath, err := resolveHomePath(PwdFileName)
+	if err != nil {
 		return nil, err
 	}
-	cipherText, err := os.ReadFile(PwdFileName)
+	cipherText, err := readSensitiveFile(pwdPath)
 	if err != nil {
 		return nil, err
 	}
 	if bytes.HasPrefix(cipherText, []byte(v2Magic)) {
 		return decryptV2(cipherText[len(v2Magic):])
 	}
-	key, err := os.ReadFile(PwdFileKey)
+	keyPath, err := resolveHomePath(PwdFileKey)
+	if err != nil {
+		return nil, err
+	}
+	key, err := readSensitiveFile(keyPath)
 	if err != nil {
 		return nil, err
 	}
@@ -374,11 +507,12 @@ func ManageErrorAndExit(err error) {
 }
 
 func GetPwdObjAfterCheckMaster() (model.PwdFile, error) {
-	if err := chdirHome(); err != nil {
+	pwdPath, err := resolveHomePath(PwdFileName)
+	if err != nil {
 		ManageErrorAndExit(err)
 		return model.PwdFile{}, err
 	}
-	if _, err := os.Stat(PwdFileName); err != nil {
+	if _, err := lstatRegularFile(pwdPath); err != nil {
 		ManageErrorAndExit(err)
 		return model.PwdFile{}, err
 	}
