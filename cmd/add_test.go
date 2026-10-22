@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"bufio"
 	"bytes"
 	"errors"
 	"io"
@@ -92,6 +93,109 @@ func TestCanSavePasswordExistingKey(t *testing.T) {
 	}
 	if !proceed {
 		t.Fatal("expected proceed to be true when map is nil")
+	}
+}
+
+func TestSharedBufferedReaderSequentialPrompts(t *testing.T) {
+	tests := []struct {
+		name        string
+		input       string
+		wantName    string
+		wantProceed bool
+	}{
+		{
+			name:        "confirms overwrite on second line",
+			input:       "github\ny\n",
+			wantName:    "github",
+			wantProceed: true,
+		},
+		{
+			name:        "confirms overwrite without trailing newline",
+			input:       "github\ny",
+			wantName:    "github",
+			wantProceed: true,
+		},
+		{
+			name:        "declines overwrite on second line",
+			input:       "github\nn\n",
+			wantName:    "github",
+			wantProceed: false,
+		},
+		{
+			name:        "eof on second prompt defaults to false",
+			input:       "github\n",
+			wantName:    "github",
+			wantProceed: false,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			r, w, err := os.Pipe()
+			if err != nil {
+				t.Fatalf("failed to create stdin pipe: %v", err)
+			}
+			defer func() {
+				_ = r.Close()
+			}()
+
+			if _, err := io.WriteString(w, tc.input); err != nil {
+				_ = w.Close()
+				t.Fatalf("failed to write piped input: %v", err)
+			}
+			_ = w.Close()
+
+			oldStdin := os.Stdin
+			os.Stdin = r
+			defer func() {
+				os.Stdin = oldStdin
+			}()
+
+			stdinReader := bufio.NewReader(os.Stdin)
+
+			name, err := readPwdName(stdinReader)
+			if err != nil {
+				t.Fatalf("expected no error reading password name, got %v", err)
+			}
+			if name != tc.wantName {
+				t.Fatalf("expected password name %q, got %q", tc.wantName, name)
+			}
+
+			saved := map[string]string{"github": "secret"}
+			proceed, err := canSavePassword(saved, name, stdinReader)
+			if err != nil {
+				t.Fatalf("expected no error reading overwrite confirmation, got %v", err)
+			}
+			if proceed != tc.wantProceed {
+				t.Fatalf("expected proceed=%v, got %v", tc.wantProceed, proceed)
+			}
+		})
+	}
+}
+
+type failingReader struct {
+	err error
+}
+
+func (f failingReader) Read(_ []byte) (int, error) {
+	return 0, f.err
+}
+
+func TestPromptReadersPropagateReadErrors(t *testing.T) {
+	readErr := errors.New("stdin read error")
+
+	_, err := readPwdName(failingReader{err: readErr})
+	if !errors.Is(err, readErr) {
+		t.Fatalf("expected error %v from readPwdName, got %v", readErr, err)
+	}
+
+	saved := map[string]string{"github": "secret"}
+	proceed, err := canSavePassword(saved, "github", failingReader{err: readErr})
+	if !errors.Is(err, readErr) {
+		t.Fatalf("expected error %v from canSavePassword, got %v", readErr, err)
+	}
+	if proceed {
+		t.Fatal("expected proceed to be false on read error")
 	}
 }
 
