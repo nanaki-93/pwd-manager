@@ -93,7 +93,7 @@ func LoadConfig(cfg *Config) error {
 		if cfg.ConfigFile != "" {
 			return fmt.Errorf("read config file %q: %w", cfg.ConfigFile, err)
 		}
-		return nil
+		return fmt.Errorf("read default config: %w", err)
 	}
 
 	cfg.ConfigFileUsed = cfg.Viper.ConfigFileUsed()

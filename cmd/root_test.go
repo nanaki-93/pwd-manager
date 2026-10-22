@@ -95,6 +95,38 @@ func TestLoadConfigFromHomeDirFile(t *testing.T) {
 	}
 }
 
+func TestLoadConfigMalformedHomeDirFileReturnsError(t *testing.T) {
+	homeDir := t.TempDir()
+	cfgPath := filepath.Join(homeDir, ".pwd-manager.yaml")
+	if err := os.WriteFile(cfgPath, []byte(":\tinvalid: [yaml\n"), 0o600); err != nil {
+		t.Fatalf("write malformed home config: %v", err)
+	}
+
+	var stderr bytes.Buffer
+	cfg := NewConfig("")
+	cfg.HomeDirFunc = func() (string, error) {
+		return homeDir, nil
+	}
+	cfg.Stderr = &stderr
+
+	err := LoadConfig(cfg)
+	if err == nil {
+		t.Fatal("expected error when default config file is malformed, got nil")
+	}
+	if !strings.Contains(err.Error(), "read default config") {
+		t.Fatalf("expected wrapped default config error context, got %v", err)
+	}
+	if errors.Unwrap(err) == nil {
+		t.Fatalf("expected wrapped underlying error, got %v", err)
+	}
+	if cfg.ConfigFileUsed != "" {
+		t.Fatalf("expected ConfigFileUsed to remain empty on error, got %q", cfg.ConfigFileUsed)
+	}
+	if stderr.Len() != 0 {
+		t.Fatalf("expected no stderr notice on error, got %q", stderr.String())
+	}
+}
+
 func TestLoadConfigBoundaries(t *testing.T) {
 	if err := LoadConfig(nil); err == nil {
 		t.Fatal("expected error when calling LoadConfig(nil), got nil")
@@ -116,9 +148,30 @@ func TestLoadConfigBoundaries(t *testing.T) {
 		t.Fatal("expected LoadConfig to initialize nil Stderr writer")
 	}
 
-	missingExplicit := NewConfig(filepath.Join(emptyHome, "does-not-exist.yaml"))
-	if err := LoadConfig(missingExplicit); err == nil {
+	missingPath := filepath.Join(emptyHome, "does-not-exist.yaml")
+	missingExplicit := NewConfig(missingPath)
+	err := LoadConfig(missingExplicit)
+	if err == nil {
 		t.Fatal("expected error when explicit ConfigFile does not exist, got nil")
+	}
+	if !strings.Contains(err.Error(), missingPath) {
+		t.Fatalf("expected explicit config path %q in error, got %v", missingPath, err)
+	}
+	if !errors.Is(err, os.ErrNotExist) && errors.Unwrap(err) == nil {
+		t.Fatalf("expected wrapped underlying error for explicit ConfigFile, got %v", err)
+	}
+
+	malformedExplicitPath := filepath.Join(emptyHome, "malformed.yaml")
+	if writeErr := os.WriteFile(malformedExplicitPath, []byte(":\tbad: [yaml\n"), 0o600); writeErr != nil {
+		t.Fatalf("write malformed explicit config: %v", writeErr)
+	}
+	malformedExplicit := NewConfig(malformedExplicitPath)
+	err = LoadConfig(malformedExplicit)
+	if err == nil {
+		t.Fatal("expected error when explicit ConfigFile is malformed, got nil")
+	}
+	if errors.Unwrap(err) == nil {
+		t.Fatalf("expected wrapped error for malformed explicit ConfigFile, got %v", err)
 	}
 }
 
