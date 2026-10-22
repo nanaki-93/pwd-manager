@@ -3,6 +3,7 @@ package daemon
 import (
 	"crypto/subtle"
 	"fmt"
+	"runtime"
 	"sync"
 	"time"
 
@@ -13,18 +14,51 @@ import (
 	"golang.design/x/hotkey/mainthread"
 )
 
-const DefaultClipboardClearTimeout = 30 * time.Second
+// DefaultClipboardClearTimeout defines the retention window before a copied
+// password is automatically cleared from the system clipboard.
+//
+// Security note: Writing a password to the shared operating system clipboard
+// exposes plaintext secret material to other local processes and clipboard
+// managers for the duration of this timeout window. The retention window is
+// kept short and paired with platform-specific concealed/transient hints to
+// minimize exposure.
+const DefaultClipboardClearTimeout = 10 * time.Second
 
 var (
-	clipboardClearTimeout = DefaultClipboardClearTimeout
-	writeClipboard        = clipboard.WriteAll
-	readClipboard         = clipboard.ReadAll
-	afterFunc             = time.AfterFunc
+	clipboardClearTimeout  = DefaultClipboardClearTimeout
+	writeClipboard         = clipboard.WriteAll
+	readClipboard          = clipboard.ReadAll
+	afterFunc              = time.AfterFunc
+	clipboardOS            = runtime.GOOS
+	markClipboardConcealed = func(flags []string) {}
 
 	clipboardMu    sync.Mutex
 	clipboardTimer *time.Timer
 	clipboardToken uint64
 )
+
+// ConcealedClipboardFlags returns platform-specific clipboard metadata hints
+// used to mark secret entries as concealed and transient where supported.
+func ConcealedClipboardFlags(goos string) []string {
+	switch goos {
+	case "darwin":
+		return []string{
+			"org.nspasteboard.ConcealedType",
+			"org.nspasteboard.TransientType",
+		}
+	case "linux":
+		return []string{
+			"x-kde-passwordManagerHint=secret",
+		}
+	case "windows":
+		return []string{
+			"ExcludeClipboardContentFromMonitorProcessing",
+			"CanIncludeInClipboardHistory=false",
+		}
+	default:
+		return nil
+	}
+}
 
 func Start() {
 	mainthread.Init(run)
@@ -79,6 +113,9 @@ func showPasswordsMenu() {
 	}
 }
 
+// copyPasswordToClipboard writes pwd to the system clipboard, records
+// platform-specific concealed/transient metadata hints, and schedules automatic
+// clearing after clipboardClearTimeout if the clipboard still holds pwd.
 func copyPasswordToClipboard(pwd string) error {
 	clipboardMu.Lock()
 	defer clipboardMu.Unlock()
@@ -91,8 +128,9 @@ func copyPasswordToClipboard(pwd string) error {
 	}
 
 	if err := writeClipboard(pwd); err != nil {
-		return err
+		return fmt.Errorf("write password to clipboard: %w", err)
 	}
+	markClipboardConcealed(ConcealedClipboardFlags(clipboardOS))
 
 	if clipboardClearTimeout <= 0 {
 		return nil
@@ -111,7 +149,9 @@ func copyPasswordToClipboard(pwd string) error {
 			return
 		}
 		if subtle.ConstantTimeCompare([]byte(current), []byte(pwd)) == 1 {
-			_ = writeClipboard("")
+			if err := writeClipboard(""); err != nil {
+				return
+			}
 		}
 	})
 
