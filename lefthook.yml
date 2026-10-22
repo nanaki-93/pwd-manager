@@ -9,6 +9,9 @@ pre-commit:
       run: |
         if command -v gitleaks >/dev/null 2>&1; then
           gitleaks protect --staged --no-banner --redact
+        elif [ "${SKIP_GITLEAKS:-0}" = "1" ]; then
+          echo "warning: gitleaks not found on PATH; skipping staged secret scan (SKIP_GITLEAKS=1)" >&2
         else
-          echo "warning: gitleaks not found on PATH; skipping staged secret scan" >&2
+          echo "error: gitleaks not found on PATH; install gitleaks or set SKIP_GITLEAKS=1 to skip staged secret scan" >&2
+          exit 1
         fi
