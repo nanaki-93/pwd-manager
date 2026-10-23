@@ -118,42 +118,73 @@ func showPasswordsMenu() {
 // clearing after clipboardClearTimeout if the clipboard still holds pwd.
 func copyPasswordToClipboard(pwd string) error {
 	clipboardMu.Lock()
-	defer clipboardMu.Unlock()
-
 	clipboardToken++
 	token := clipboardToken
 	if clipboardTimer != nil {
 		clipboardTimer.Stop()
 		clipboardTimer = nil
 	}
+	writeFn := writeClipboard
+	clipboardMu.Unlock()
 
-	if err := writeClipboard(pwd); err != nil {
+	if err := writeFn(pwd); err != nil {
 		return fmt.Errorf("write password to clipboard: %w", err)
 	}
-	markClipboardConcealed(ConcealedClipboardFlags(clipboardOS))
 
-	if clipboardClearTimeout <= 0 {
+	clipboardMu.Lock()
+	if clipboardToken != token {
+		clipboardMu.Unlock()
+		return nil
+	}
+	markFn := markClipboardConcealed
+	goos := clipboardOS
+	timeout := clipboardClearTimeout
+	scheduleFn := afterFunc
+	clipboardMu.Unlock()
+
+	markFn(ConcealedClipboardFlags(goos))
+
+	if timeout <= 0 {
 		return nil
 	}
 
-	clipboardTimer = afterFunc(clipboardClearTimeout, func() {
-		clipboardMu.Lock()
-		defer clipboardMu.Unlock()
+	clipboardMu.Lock()
+	defer clipboardMu.Unlock()
+	if clipboardToken != token {
+		return nil
+	}
 
-		if clipboardToken != token {
-			return
-		}
-
-		current, err := readClipboard()
-		if err != nil {
-			return
-		}
-		if subtle.ConstantTimeCompare([]byte(current), []byte(pwd)) == 1 {
-			if err := writeClipboard(""); err != nil {
-				return
-			}
-		}
+	clipboardTimer = scheduleFn(timeout, func() {
+		clearClipboardIfTokenMatches(token, pwd)
 	})
 
 	return nil
+}
+
+func clearClipboardIfTokenMatches(token uint64, pwd string) {
+	clipboardMu.Lock()
+	if clipboardToken != token {
+		clipboardMu.Unlock()
+		return
+	}
+	readFn := readClipboard
+	clipboardMu.Unlock()
+
+	current, err := readFn()
+	if err != nil {
+		return
+	}
+	if subtle.ConstantTimeCompare([]byte(current), []byte(pwd)) != 1 {
+		return
+	}
+
+	clipboardMu.Lock()
+	if clipboardToken != token {
+		clipboardMu.Unlock()
+		return
+	}
+	writeFn := writeClipboard
+	clipboardMu.Unlock()
+
+	_ = writeFn("")
 }

@@ -4,6 +4,7 @@ import (
 	"errors"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -520,5 +521,148 @@ func TestCopyPasswordToClipboard_StaleTimerInvalidatedOnSubsequentWriteError(t *
 	scheduledFn()
 	if readReads != 0 {
 		t.Fatalf("expected stale callback to return before reading clipboard, got %d reads", readReads)
+	}
+}
+
+type concurrentClipboardHarness struct {
+	mu               sync.Mutex
+	currentClipboard string
+	markCount        int
+	clearWrites      int
+	callbacks        []func()
+}
+
+func newConcurrentClipboardHarness() *concurrentClipboardHarness {
+	h := &concurrentClipboardHarness{}
+	writeClipboard = h.write
+	readClipboard = h.read
+	markClipboardConcealed = func(flags []string) {
+		h.mu.Lock()
+		h.markCount++
+		h.mu.Unlock()
+	}
+	afterFunc = func(d time.Duration, f func()) *time.Timer {
+		h.mu.Lock()
+		h.callbacks = append(h.callbacks, f)
+		h.mu.Unlock()
+		tm := time.NewTimer(time.Hour)
+		tm.Stop()
+		return tm
+	}
+	return h
+}
+
+func (h *concurrentClipboardHarness) write(text string) error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if text == "" {
+		h.clearWrites++
+	}
+	h.currentClipboard = text
+	return nil
+}
+
+func (h *concurrentClipboardHarness) read() (string, error) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.currentClipboard, nil
+}
+
+func assertFastCopyPassword(t *testing.T, pwd string) {
+	t.Helper()
+	start := time.Now()
+	if err := copyPasswordToClipboard(pwd); err != nil {
+		t.Fatalf("unexpected error on concurrent copy: %v", err)
+	}
+	if elapsed := time.Since(start); elapsed > 50*time.Millisecond {
+		t.Fatalf("expected concurrent copy not to block on slow clipboard I/O, took %v", elapsed)
+	}
+}
+
+func TestCopyPasswordToClipboard_SlowWriteDoesNotHoldLockAndCancelsStaleCopy(t *testing.T) {
+	resetClipboardTestState(t)
+	h := newConcurrentClipboardHarness()
+
+	slowWriteStarted := make(chan struct{})
+	releaseSlowWrite := make(chan struct{})
+	writeClipboard = func(text string) error {
+		if text == "slow-secret" {
+			close(slowWriteStarted)
+			<-releaseSlowWrite
+			return nil
+		}
+		return h.write(text)
+	}
+
+	firstDone := make(chan error, 1)
+	go func() {
+		firstDone <- copyPasswordToClipboard("slow-secret")
+	}()
+	<-slowWriteStarted
+
+	assertFastCopyPassword(t, "fast-secret")
+
+	close(releaseSlowWrite)
+	if err := <-firstDone; err != nil {
+		t.Fatalf("unexpected error from first copy: %v", err)
+	}
+
+	h.mu.Lock()
+	gotMarks := h.markCount
+	gotCallbacks := len(h.callbacks)
+	activeCallback := h.callbacks[0]
+	h.mu.Unlock()
+
+	if gotMarks != 1 {
+		t.Fatalf("expected markClipboardConcealed only for active token, got %d calls", gotMarks)
+	}
+	if gotCallbacks != 1 {
+		t.Fatalf("expected only 1 timer scheduled (stale copy cancelled), got %d", gotCallbacks)
+	}
+
+	activeCallback()
+	if got, _ := h.read(); got != "" {
+		t.Fatalf("expected active timer to clear fast-secret, got %q", got)
+	}
+}
+
+func TestCopyPasswordToClipboard_SlowReadOnExpirationDoesNotBlockConcurrentCopyAndSkipsClear(t *testing.T) {
+	resetClipboardTestState(t)
+	h := newConcurrentClipboardHarness()
+
+	slowReadStarted := make(chan struct{})
+	releaseSlowRead := make(chan struct{})
+	readClipboard = func() (string, error) {
+		close(slowReadStarted)
+		<-releaseSlowRead
+		return "first-secret", nil
+	}
+
+	if err := copyPasswordToClipboard("first-secret"); err != nil {
+		t.Fatalf("unexpected error on first copy: %v", err)
+	}
+
+	expireDone := make(chan struct{})
+	go func() {
+		h.callbacks[0]()
+		close(expireDone)
+	}()
+	<-slowReadStarted
+
+	assertFastCopyPassword(t, "second-secret")
+
+	close(releaseSlowRead)
+	<-expireDone
+
+	h.mu.Lock()
+	gotClearWrites := h.clearWrites
+	gotClipboard := h.currentClipboard
+	h.mu.Unlock()
+
+	if gotClearWrites != 0 {
+		t.Fatalf("expected stale expiration not to clear clipboard after new copy, got %d clear writes", gotClearWrites)
+	}
+	if gotClipboard != "second-secret" {
+		t.Fatalf("expected second-secret to remain in clipboard, got %q", gotClipboard)
 	}
 }
