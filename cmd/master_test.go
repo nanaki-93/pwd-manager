@@ -26,19 +26,23 @@ func withTempHome(t *testing.T) string {
 	}
 	revExit := utils.SetExitFunc(func(int) {})
 	t.Cleanup(func() {
+		utils.SetMasterKey(nil)
 		revExit()
 		_ = os.Chdir(origWd)
 	})
 
 	tmpHome := t.TempDir()
 	t.Setenv("HOME", tmpHome)
+	utils.SetMasterKey(nil)
 	return tmpHome
 }
 
 func writeTestKey(t *testing.T, tmpHome string, b byte) string {
 	t.Helper()
+	keyBytes := bytes.Repeat([]byte{b}, 32)
+	utils.SetMasterKey(keyBytes)
 	keyPath := filepath.Join(tmpHome, utils.PwdFileKey)
-	if err := os.WriteFile(keyPath, bytes.Repeat([]byte{b}, 32), 0700); err != nil {
+	if err := os.WriteFile(keyPath, keyBytes, 0700); err != nil {
 		t.Fatalf("failed to write key file: %v", err)
 	}
 	return keyPath
@@ -90,18 +94,23 @@ func TestGenerateKeyReturnsErrorOnWriteFailure(t *testing.T) {
 
 	err := generateKey([]byte("valid-master-secret"))
 	var pathErr *os.PathError
-	if !errors.As(err, &pathErr) || !strings.Contains(err.Error(), "write key file:") {
-		t.Fatalf("expected wrapped *os.PathError from os.WriteFile, got %v", err)
+	if !errors.As(err, &pathErr) {
+		t.Fatalf("expected *os.PathError when key path is a directory, got %v", err)
 	}
 	if !bytes.Equal(capturedSaltBuf, make([]byte, len(capturedSaltBuf))) {
-		t.Fatalf("expected salt buffer to be zeroed on write error, got %x", capturedSaltBuf)
+		t.Fatalf("expected salt buffer to be zeroed on failure, got %x", capturedSaltBuf)
 	}
 }
 
-func TestGenerateKeyWritesExpectedKeyOnSuccess(t *testing.T) {
+func TestGenerateKeyDoesNotPersistRawKeyAndRemovesLegacyKeyFile(t *testing.T) {
 	tmpHome := withTempHome(t)
 	origRandRead := randRead
 	defer func() { randRead = origRandRead }()
+
+	legacyKeyPath := filepath.Join(tmpHome, utils.PwdFileKey)
+	if err := os.WriteFile(legacyKeyPath, bytes.Repeat([]byte{0xdd}, 32), 0600); err != nil {
+		t.Fatalf("failed to seed legacy key file: %v", err)
+	}
 
 	password := []byte("valid-master-secret")
 	fixedSalt := bytes.Repeat([]byte{0xab}, 32)
@@ -123,23 +132,29 @@ func TestGenerateKeyWritesExpectedKeyOnSuccess(t *testing.T) {
 	if err := generateKey(password); err != nil {
 		t.Fatalf("expected nil error from generateKey, got: %v", err)
 	}
-	keyPath := filepath.Join(tmpHome, utils.PwdFileKey)
-	info, err := os.Stat(keyPath)
-	if err != nil {
-		t.Fatalf("failed to stat generated key file: %v", err)
-	}
-	if perm := info.Mode().Perm(); perm != 0600 || perm&0111 != 0 {
-		t.Fatalf("expected key file permissions 0600 without execution bits, got %#o", perm)
-	}
-	gotKey, err := os.ReadFile(keyPath)
-	if err != nil || !bytes.Equal(gotKey, expectedKey) {
-		t.Fatalf("generated key mismatch: got %x, want %x (err=%v)", gotKey, expectedKey, err)
-	}
-	if bytes.Equal(gotKey, fixedSalt) {
-		t.Fatalf("expected persisted key not to equal raw random salt bytes")
+	if _, err := os.Stat(legacyKeyPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("expected no key file on disk after generateKey, stat err: %v", err)
 	}
 	if !bytes.Equal(capturedSaltBuf, make([]byte, len(capturedSaltBuf))) {
 		t.Fatalf("expected in-memory salt buffer to be zeroed after generateKey, got %x", capturedSaltBuf)
+	}
+
+	hashed, err := utils.HashMasterPassword(password)
+	if err != nil {
+		t.Fatalf("failed to hash password: %v", err)
+	}
+	if err := utils.SaveFileErr(model.PwdFile{MasterPassword: hashed}, nil); err != nil {
+		t.Fatalf("expected SaveFileErr to succeed using in-memory master key, got: %v", err)
+	}
+	if _, err := os.Stat(legacyKeyPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("expected key file still not to exist after SaveFileErr, stat err: %v", err)
+	}
+	pwdBytes, err := os.ReadFile(filepath.Join(tmpHome, utils.PwdFileName))
+	if err != nil {
+		t.Fatalf("failed to read encrypted password file: %v", err)
+	}
+	if bytes.Contains(pwdBytes, expectedKey) || bytes.Contains(pwdBytes, password) {
+		t.Fatalf("expected encrypted file not to contain raw derived key or plaintext password")
 	}
 }
 
@@ -148,6 +163,9 @@ func TestDeriveKeyAndGenerateKeyValidationBoundaries(t *testing.T) {
 	saltA := bytes.Repeat([]byte{0x11}, 32)
 	saltB := bytes.Repeat([]byte{0x22}, 32)
 
+	if err := generateKey(); err == nil {
+		t.Fatalf("expected generateKey with no arguments to reject empty password")
+	}
 	for _, invalidPwd := range [][]byte{nil, []byte(""), []byte("   "), []byte("short77")} {
 		if _, err := deriveKey(invalidPwd, saltA); err == nil {
 			t.Fatalf("expected deriveKey to reject weak password %q", invalidPwd)
@@ -214,17 +232,13 @@ func TestExecMasterCmdAbortsWhenKeyGenerationFails(t *testing.T) {
 	}
 }
 
-func TestExecMasterCmdInitializesKeyAndHashedPassword(t *testing.T) {
+func TestExecMasterCmdInitializesHashedPasswordWithoutKeyFile(t *testing.T) {
 	tmpHome := withTempHome(t)
 	stubPasswordSequence(t, "first-time-secret")
 	execMasterCmd(masterCmd, nil)
 
-	keyInfo, err := os.Stat(filepath.Join(tmpHome, utils.PwdFileKey))
-	if err != nil {
-		t.Fatalf("expected key file to exist after initial master command, got: %v", err)
-	}
-	if perm := keyInfo.Mode().Perm(); perm != 0600 || perm&0111 != 0 {
-		t.Fatalf("expected initialized key file permissions 0600 without execution bits, got %#o", perm)
+	if _, err := os.Stat(filepath.Join(tmpHome, utils.PwdFileKey)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("expected no key file on disk after master command, got stat err: %v", err)
 	}
 	loaded, err := utils.GetPwdObj()
 	if err != nil || !strings.HasPrefix(loaded.MasterPassword, "pbkdf2-sha256$") {
@@ -700,6 +714,7 @@ func TestSavePasswordZeroesPasswordBuffersAndHeapSnapshot(t *testing.T) {
 	savePassword(persisted)
 	savePassword(persisted)
 	savePassword(persisted)
+	utils.SetMasterKey(nil)
 
 	verifyZeroedBuffersAndHeap(t, tmpHome, buffers, len(seeds), []byte{11, 29, 83})
 }
