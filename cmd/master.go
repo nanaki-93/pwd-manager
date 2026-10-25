@@ -121,9 +121,9 @@ func generateKey(password ...[]byte) error {
 	var pwd []byte
 	if len(password) > 0 {
 		pwd = password[0]
-		if err := validateMasterPassword(pwd); err != nil {
-			return err
-		}
+	}
+	if err := validateMasterPassword(pwd); err != nil {
+		return err
 	}
 	utils.GoToHomeDir()
 	fmt.Println("Generating a key to encrypt your file:")
@@ -135,12 +135,32 @@ func generateKey(password ...[]byte) error {
 		return fmt.Errorf("read random key bytes: %w", err)
 	}
 
-	derivedKey := pbkdf2SHA256(pwd, salt, keyDerivationIterations, encryptionKeyLen)
+	derivedKey, err := deriveKey(pwd, salt)
+	if err != nil {
+		return err
+	}
 	defer clear(derivedKey)
 
-	err = os.WriteFile(utils.PwdFileKey, derivedKey, 0600)
+	if err := removeLegacyKeyFile(); err != nil {
+		return err
+	}
+	utils.SetMasterKey(derivedKey)
+	return nil
+}
+
+func removeLegacyKeyFile() error {
+	info, err := os.Lstat(utils.PwdFileKey)
 	if err != nil {
-		return fmt.Errorf("write key file: %w", err)
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		return fmt.Errorf("stat key file: %w", err)
+	}
+	if !info.Mode().IsRegular() {
+		return &os.PathError{Op: "remove", Path: utils.PwdFileKey, Err: errors.New("not a regular file")}
+	}
+	if err := os.Remove(utils.PwdFileKey); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("remove key file: %w", err)
 	}
 	return nil
 }
