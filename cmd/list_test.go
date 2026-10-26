@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
 	"strings"
 	"testing"
@@ -179,5 +180,186 @@ func TestListCmd_ShowFlagParsing(t *testing.T) {
 	}
 	if listShowFlag {
 		t.Fatal("expected listShowFlag to be false after parsing --show=false")
+	}
+}
+
+func TestListCmd_JSONFlagRegistered(t *testing.T) {
+	flag := listCmd.Flags().Lookup("json")
+	if flag == nil {
+		flag = listCmd.PersistentFlags().Lookup("json")
+	}
+	if flag == nil {
+		t.Fatal("expected --json flag to be registered on listCmd")
+	}
+	if flag.DefValue != "false" {
+		t.Fatalf("expected default value 'false', got %q", flag.DefValue)
+	}
+}
+
+func TestListCmd_JSONFlagParsing(t *testing.T) {
+	orig := listJSONFlag
+	t.Cleanup(func() {
+		_ = listCmd.Flags().Set("json", "false")
+		listJSONFlag = orig
+	})
+
+	if err := listCmd.ParseFlags([]string{"--json"}); err != nil {
+		t.Fatalf("unexpected error parsing --json: %v", err)
+	}
+	if !listJSONFlag {
+		t.Fatal("expected listJSONFlag to be true after parsing --json")
+	}
+
+	if err := listCmd.ParseFlags([]string{"--json=false"}); err != nil {
+		t.Fatalf("unexpected error parsing --json=false: %v", err)
+	}
+	if listJSONFlag {
+		t.Fatal("expected listJSONFlag to be false after parsing --json=false")
+	}
+}
+
+func TestWriteListJSONOutput_MasksByDefaultAndValidStructure(t *testing.T) {
+	saved := map[string]string{
+		"github": "super-secret-1",
+		"email":  "hunter2",
+	}
+
+	var buf bytes.Buffer
+	if err := writeListJSONOutput(&buf, saved, false); err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+
+	raw := buf.String()
+	wantFormatted := "{\n  \"email\": \"********\",\n  \"github\": \"********\"\n}\n"
+	if raw != wantFormatted {
+		t.Fatalf("unexpected formatted JSON: got %q, want %q", raw, wantFormatted)
+	}
+	if strings.Contains(raw, "super-secret-1") || strings.Contains(raw, "hunter2") {
+		t.Fatalf("plaintext password leaked in masked JSON output: %q", raw)
+	}
+
+	var parsed map[string]string
+	if err := json.Unmarshal(buf.Bytes(), &parsed); err != nil {
+		t.Fatalf("output is not valid JSON: %v", err)
+	}
+	if len(parsed) != 2 || parsed["email"] != maskedPasswordPlaceholder || parsed["github"] != maskedPasswordPlaceholder {
+		t.Fatalf("unexpected parsed JSON map: %#v", parsed)
+	}
+}
+
+func TestWriteListJSONOutput_ShowsPlaintextWhenFlagSet(t *testing.T) {
+	saved := map[string]string{
+		"github":  "super-secret-1",
+		"email":   "hunter2",
+		"special": "p@ss:w0rd!",
+	}
+
+	var buf bytes.Buffer
+	if err := writeListJSONOutput(&buf, saved, true); err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+
+	var parsed map[string]string
+	if err := json.Unmarshal(buf.Bytes(), &parsed); err != nil {
+		t.Fatalf("output is not valid JSON: %v", err)
+	}
+	for k, want := range saved {
+		if got, ok := parsed[k]; !ok || got != want {
+			t.Fatalf("for key %q: got %q (ok=%v), want %q", k, got, ok, want)
+		}
+	}
+}
+
+func TestWriteListJSONOutput_EmptyAndNilMap(t *testing.T) {
+	for _, tc := range []struct {
+		name          string
+		saved         map[string]string
+		showPlaintext bool
+	}{
+		{name: "nil map masked", saved: nil, showPlaintext: false},
+		{name: "nil map plaintext", saved: nil, showPlaintext: true},
+		{name: "empty map masked", saved: map[string]string{}, showPlaintext: false},
+		{name: "empty map plaintext", saved: map[string]string{}, showPlaintext: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			if err := writeListJSONOutput(&buf, tc.saved, tc.showPlaintext); err != nil {
+				t.Fatalf("expected no error, got %v", err)
+			}
+			if buf.String() != "{}\n" {
+				t.Fatalf("expected empty JSON object, got %q", buf.String())
+			}
+			var parsed map[string]string
+			if err := json.Unmarshal(buf.Bytes(), &parsed); err != nil {
+				t.Fatalf("output is not valid JSON: %v", err)
+			}
+			if len(parsed) != 0 {
+				t.Fatalf("expected empty parsed map, got %#v", parsed)
+			}
+		})
+	}
+}
+
+func TestWriteListJSONOutput_PropagatesWriteError(t *testing.T) {
+	saved := map[string]string{"github": "super-secret-1"}
+	boom := errors.New("broken pipe")
+
+	err := writeListJSONOutput(errWriter{err: boom}, saved, false)
+	if !errors.Is(err, boom) {
+		t.Fatalf("expected wrapped error %v, got %v", boom, err)
+	}
+	if !strings.Contains(err.Error(), "write list json output:") {
+		t.Fatalf("expected error context 'write list json output:', got %q", err.Error())
+	}
+}
+
+func TestRunListCmd_DefaultPlainTextWhenJSONOmitted(t *testing.T) {
+	saved := map[string]string{
+		"github": "super-secret-1",
+		"email":  "hunter2",
+	}
+
+	var outBuf, errBuf bytes.Buffer
+	if err := runListCmd(&outBuf, &errBuf, saved, false, false); err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+	want := "email: ********\ngithub: ********\n"
+	if outBuf.String() != want {
+		t.Fatalf("unexpected stdout: got %q, want %q", outBuf.String(), want)
+	}
+	if errBuf.Len() != 0 {
+		t.Fatalf("expected empty stderr, got %q", errBuf.String())
+	}
+}
+
+func TestRunListCmd_JSONModeWritesStdoutAndRoutesErrorsToStderr(t *testing.T) {
+	saved := map[string]string{
+		"github": "super-secret-1",
+	}
+
+	var outBuf, errBuf bytes.Buffer
+	if err := runListCmd(&outBuf, &errBuf, saved, true, true); err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+	if errBuf.Len() != 0 {
+		t.Fatalf("expected empty stderr on success, got %q", errBuf.String())
+	}
+	var parsed map[string]string
+	if err := json.Unmarshal(outBuf.Bytes(), &parsed); err != nil {
+		t.Fatalf("expected valid JSON on stdout, got error: %v", err)
+	}
+	if parsed["github"] != "super-secret-1" {
+		t.Fatalf("unexpected value for github: %q", parsed["github"])
+	}
+
+	// Verify error routing to stderr when JSON output fails.
+	boom := errors.New("stdout write failure")
+	var failErrBuf bytes.Buffer
+	err := runListCmd(errWriter{err: boom}, &failErrBuf, saved, false, true)
+	if !errors.Is(err, boom) {
+		t.Fatalf("expected wrapped error %v, got %v", boom, err)
+	}
+	if !strings.Contains(failErrBuf.String(), "stdout write failure") {
+		t.Fatalf("expected error message written to stderr, got %q", failErrBuf.String())
 	}
 }
