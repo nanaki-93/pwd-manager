@@ -24,6 +24,7 @@ const (
 	encryptionKeyLen        = 32
 	keyDerivationSaltLen    = 32
 	keyDerivationIterations = 100_000
+	keyDerivationSaltFile   = ".pwd-salt"
 )
 
 var randRead = io.ReadFull
@@ -130,9 +131,9 @@ func generateKey(password ...[]byte) error {
 	salt := make([]byte, keyDerivationSaltLen)
 	defer clear(salt)
 
-	_, err := randRead(rand.Reader, salt)
+	loaded, err := loadOrCreateKeySalt(salt)
 	if err != nil {
-		return fmt.Errorf("read random key bytes: %w", err)
+		return err
 	}
 
 	derivedKey, err := deriveKey(pwd, salt)
@@ -144,7 +145,63 @@ func generateKey(password ...[]byte) error {
 	if err := removeLegacyKeyFile(); err != nil {
 		return err
 	}
+	if !loaded {
+		if err := writeKeySalt(salt); err != nil {
+			return err
+		}
+	}
 	utils.SetMasterKey(derivedKey)
+	return nil
+}
+
+func loadOrCreateKeySalt(salt []byte) (bool, error) {
+	loaded, err := readKeySalt(salt)
+	if err != nil || loaded {
+		return loaded, err
+	}
+	if _, err := randRead(rand.Reader, salt); err != nil {
+		return false, fmt.Errorf("read random key bytes: %w", err)
+	}
+	return false, nil
+}
+
+func readKeySalt(salt []byte) (bool, error) {
+	info, err := os.Lstat(keyDerivationSaltFile)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return false, nil
+		}
+		return false, fmt.Errorf("stat salt file: %w", err)
+	}
+	if !info.Mode().IsRegular() {
+		return false, &os.PathError{Op: "open", Path: keyDerivationSaltFile, Err: errors.New("not a regular file")}
+	}
+	data, err := os.ReadFile(keyDerivationSaltFile)
+	if err != nil {
+		return false, fmt.Errorf("read salt file: %w", err)
+	}
+	defer clear(data)
+	if len(data) != len(salt) {
+		return false, fmt.Errorf("invalid salt file length: got %d, want %d", len(data), len(salt))
+	}
+	copy(salt, data)
+	return true, nil
+}
+
+func writeKeySalt(salt []byte) error {
+	if len(salt) == 0 {
+		return errors.New("key derivation salt cannot be empty")
+	}
+	info, err := os.Lstat(keyDerivationSaltFile)
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("stat salt file: %w", err)
+	}
+	if err == nil && !info.Mode().IsRegular() {
+		return &os.PathError{Op: "write", Path: keyDerivationSaltFile, Err: errors.New("not a regular file")}
+	}
+	if err := os.WriteFile(keyDerivationSaltFile, salt, 0o600); err != nil {
+		return fmt.Errorf("write salt file: %w", err)
+	}
 	return nil
 }
 
