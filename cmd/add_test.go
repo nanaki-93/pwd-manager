@@ -37,10 +37,32 @@ func TestReadPwdNameEmpty(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error for empty password name, got nil")
 	}
+	if errors.Is(err, io.EOF) {
+		t.Fatalf("did not expect io.EOF for newline-terminated whitespace, got %v", err)
+	}
 
-	_, err = readPwdName(strings.NewReader(""))
-	if !errors.Is(err, io.EOF) {
-		t.Fatalf("expected io.EOF for empty reader, got %v", err)
+	for _, tc := range []struct {
+		name  string
+		input string
+	}{
+		{name: "empty reader", input: ""},
+		{name: "whitespace only before EOF", input: "   \t  "},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := readPwdName(strings.NewReader(tc.input))
+			if err == nil {
+				t.Fatal("expected error, got nil")
+			}
+			if !errors.Is(err, io.EOF) {
+				t.Fatalf("expected errors.Is(err, io.EOF) to be true, got %v", err)
+			}
+			if err == io.EOF || err.Error() == io.EOF.Error() {
+				t.Fatalf("expected wrapped io.EOF with context, got bare %q", err)
+			}
+			if !strings.Contains(err.Error(), "read password name:") {
+				t.Fatalf("expected operation context 'read password name:' in error, got %q", err.Error())
+			}
+		})
 	}
 }
 
@@ -259,6 +281,12 @@ func TestPromptReadersPropagateReadErrors(t *testing.T) {
 	_, err := readPwdName(failingReader{err: readErr})
 	if !errors.Is(err, readErr) {
 		t.Fatalf("expected error %v from readPwdName, got %v", readErr, err)
+	}
+	if err == readErr || err.Error() == readErr.Error() {
+		t.Fatalf("expected wrapped error with context from readPwdName, got bare %q", err)
+	}
+	if !strings.Contains(err.Error(), "read password name:") {
+		t.Fatalf("expected operation context 'read password name:' in error, got %q", err.Error())
 	}
 
 	saved := map[string]string{"github": "secret"}

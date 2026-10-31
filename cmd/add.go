@@ -32,12 +32,12 @@ func readPwdName(r io.Reader) (string, error) {
 	reader := bufio.NewReader(r)
 	line, err := reader.ReadString('\n')
 	if err != nil && !errors.Is(err, io.EOF) {
-		return "", err
+		return "", fmt.Errorf("read password name: %w", err)
 	}
 	pwdName := strings.TrimSpace(line)
 	if pwdName == "" {
 		if errors.Is(err, io.EOF) {
-			return "", err
+			return "", fmt.Errorf("read password name: no password name provided before end of input: %w", err)
 		}
 		return "", errors.New("password name cannot be empty")
 	}
