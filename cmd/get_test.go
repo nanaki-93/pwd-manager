@@ -17,7 +17,10 @@ func captureStdout(t *testing.T, fn func()) string {
 		t.Fatalf("failed to create pipe: %v", err)
 	}
 	os.Stdout = w
+	t.Cleanup(func() { _ = r.Close() })
 	defer func() {
+		// Close is idempotent here: a second call only returns an ignored error.
+		_ = w.Close()
 		os.Stdout = oldStdout
 	}()
 

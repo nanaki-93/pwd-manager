@@ -6,10 +6,12 @@ import (
 	"errors"
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/nanaki-93/pwd-manager/internal/model"
+	"github.com/nanaki-93/pwd-manager/internal/utils"
 )
 
 func TestReadPwdNameWithSpaces(t *testing.T) {
@@ -300,30 +302,62 @@ func TestPromptReadersPropagateReadErrors(t *testing.T) {
 }
 
 func TestSavePasswordRejectsEmptyCurrentPassword(t *testing.T) {
-	oldStdout := os.Stdout
-	r, w, err := os.Pipe()
-	if err != nil {
-		t.Fatalf("failed to create pipe: %v", err)
+	// Isolate the vault from the real home directory and answer the prompt with
+	// an empty current password so the test never reads from a real terminal.
+	t.Setenv("HOME", t.TempDir())
+	tmpHome := os.Getenv("HOME")
+	prompts := 0
+	promptHome := ""
+	restorePrompt := utils.SetReadPasswordStdin(func() ([]byte, error) {
+		prompts++
+		promptHome = os.Getenv("HOME")
+		return []byte{}, nil
+	})
+	t.Cleanup(restorePrompt)
+
+	// captureStdout restores os.Stdout in a defer, so a failure or panic in
+	// savePassword cannot leave it redirected.
+	output := captureStdout(t, func() {
+		savePassword(model.PwdFile{MasterPassword: "existing-master"})
+	})
+
+	if prompts != 1 {
+		t.Fatalf("expected exactly one stubbed password prompt, got %d", prompts)
 	}
-	os.Stdout = w
-
-	// In non-terminal test environments, term.ReadPassword fails immediately and returns empty bytes,
-	// simulating an empty current password input.
-	savePassword(model.PwdFile{MasterPassword: "existing-master"})
-
-	_ = w.Close()
-	os.Stdout = oldStdout
-
-	var buf bytes.Buffer
-	_, _ = io.Copy(&buf, r)
-	_ = r.Close()
-
-	output := buf.String()
+	if promptHome != tmpHome {
+		t.Fatalf("expected prompt to run with HOME=%q, got %q", tmpHome, promptHome)
+	}
 	if !strings.Contains(output, "Passwords do not match") {
 		t.Fatalf("expected 'Passwords do not match' in output, got %q", output)
 	}
 	if strings.Contains(output, "Password saved") {
 		t.Fatalf("did not expect 'Password saved' in output, got %q", output)
+	}
+	if _, err := os.Stat(filepath.Join(tmpHome, utils.PwdFileName)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("expected no vault file in isolated HOME, stat err: %v", err)
+	}
+}
+
+func TestCaptureStdoutRestoresStdoutOnPanic(t *testing.T) {
+	original := os.Stdout
+	t.Cleanup(func() { os.Stdout = original })
+
+	panicked := false
+	func() {
+		defer func() {
+			panicked = recover() != nil
+		}()
+		captureStdout(t, func() {
+			_, _ = io.WriteString(os.Stdout, "partial output")
+			panic("savePassword failed")
+		})
+	}()
+
+	if !panicked {
+		t.Fatal("expected the panic to propagate out of captureStdout")
+	}
+	if os.Stdout != original {
+		t.Fatal("expected os.Stdout to be restored after a panic during capture")
 	}
 }
 
