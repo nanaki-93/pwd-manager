@@ -7,6 +7,7 @@ import (
 	"bufio"
 	"errors"
 	"fmt"
+	"github.com/nanaki-93/pwd-manager/internal/model"
 	"github.com/nanaki-93/pwd-manager/internal/utils"
 	"github.com/spf13/cobra"
 	"io"
@@ -57,6 +58,22 @@ func canSavePassword(savedPasswords map[string]string, pwdName string, r io.Read
 	return strings.EqualFold(strings.TrimSpace(line), "y"), nil
 }
 
+// saveVault persists the vault; a package variable so tests can inject failures.
+var saveVault = utils.SaveFileErr
+
+// storePassword records pwdValue under pwdName and persists the vault,
+// returning any save failure with context instead of relying on a stale error.
+func storePassword(pwdObj model.PwdFile, pwdName, pwdValue string) error {
+	if pwdObj.SavedPasswords == nil {
+		pwdObj.SavedPasswords = make(map[string]string)
+	}
+	pwdObj.SavedPasswords[pwdName] = pwdValue
+	if err := saveVault(pwdObj, nil); err != nil {
+		return fmt.Errorf("save password %q: %w", pwdName, err)
+	}
+	return nil
+}
+
 func execAddCmd(cmd *cobra.Command, args []string) {
 
 	pwdObj, err := utils.GetPwdObjAfterCheckMaster()
@@ -79,8 +96,10 @@ func execAddCmd(cmd *cobra.Command, args []string) {
 	}
 
 	pwdValue := utils.PromptPassword("Insert the password for " + pwdName + ":")
-	pwdObj.SavedPasswords[pwdName] = string(pwdValue)
-	utils.SaveFile(pwdObj, err)
+	if err := storePassword(pwdObj, pwdName, string(pwdValue)); err != nil {
+		utils.ManageErrorAndExit(err)
+		return
+	}
 	if addCopyFlag {
 		_ = copyPasswordToClipboard(string(pwdValue))
 	}
