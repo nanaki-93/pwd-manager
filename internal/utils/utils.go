@@ -19,6 +19,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -33,10 +34,19 @@ const PwdFileKey = ".pwd-key"
 const (
 	hashPrefix     = "pbkdf2-sha256$"
 	saltSize       = 16
-	pbkdf2Iter     = 100000
 	derivedKeySize = 32
-	v2Magic        = "PWD2"
 	sensitivePerm  = 0600
+	// pbkdf2Iter is the current PBKDF2-HMAC-SHA256 work factor. It is recorded in
+	// both the hash string and the v3 store header so it can be raised later.
+	pbkdf2Iter = 600000
+	// legacyPBKDF2Iter is the fixed work factor of hashes and v2 stores written
+	// before parameters were recorded; they are upgraded on the next unlock.
+	legacyPBKDF2Iter = 100000
+	// maxPBKDF2Iter bounds parsed iteration counts so a crafted file cannot stall unlocks.
+	maxPBKDF2Iter = 10000000
+	v2Magic       = "PWD2"
+	v3Magic       = "PWD3"
+	iterFieldSize = 4
 )
 
 var (
@@ -75,12 +85,16 @@ func getMasterKey() []byte {
 	return append([]byte(nil), sessionMasterKey...)
 }
 
-func deriveEncryptionKey(secret, salt []byte) []byte {
+func deriveEncryptionKey(secret, salt []byte, iter int) []byte {
 	domainSalt := make([]byte, 0, len(salt)+len("enc-v2")+1)
 	domainSalt = append(domainSalt, salt...)
 	domainSalt = append(domainSalt, ':')
 	domainSalt = append(domainSalt, "enc-v2"...)
-	return pbkdf2SHA256(secret, domainSalt, pbkdf2Iter, derivedKeySize)
+	return pbkdf2SHA256(secret, domainSalt, iter, derivedKeySize)
+}
+
+func validIterations(iter int) bool {
+	return iter >= legacyPBKDF2Iter && iter <= maxPBKDF2Iter
 }
 
 // SetExitFunc overrides the process termination function for testing and returns a restore callback.
@@ -101,39 +115,60 @@ func SetReadPasswordStdin(fn func() ([]byte, error)) func() {
 	}
 }
 
-// HashMasterPassword generates a salted PBKDF2-SHA256 hash of the supplied password.
+// HashMasterPassword generates a salted PBKDF2-SHA256 hash of the supplied password
+// in the form "pbkdf2-sha256$<iterations>$<salt hex>$<key hex>".
 func HashMasterPassword(password []byte) (string, error) {
 	salt := make([]byte, saltSize)
 	if _, err := randRead(rand.Reader, salt); err != nil {
 		return "", fmt.Errorf("generate salt: %w", err)
 	}
 	dk := pbkdf2SHA256(password, salt, pbkdf2Iter, derivedKeySize)
-	return fmt.Sprintf("%s%s$%s", hashPrefix, hex.EncodeToString(salt), hex.EncodeToString(dk)), nil
+	return fmt.Sprintf("%s%d$%s$%s", hashPrefix, pbkdf2Iter, hex.EncodeToString(salt), hex.EncodeToString(dk)), nil
 }
 
 // VerifyMasterPassword checks candidate against stored in constant time.
+// Legacy hashes without a recorded iteration count are verified with legacyPBKDF2Iter.
 func VerifyMasterPassword(stored string, candidate []byte) bool {
-	if !strings.HasPrefix(stored, hashPrefix) {
+	iter, salt, expectedDK, ok := parsePBKDF2Hash(stored)
+	if !ok {
 		return false
 	}
-	return verifyPBKDF2(strings.TrimPrefix(stored, hashPrefix), candidate)
+	actualDK := pbkdf2SHA256(candidate, salt, iter, derivedKeySize)
+	return subtle.ConstantTimeCompare(expectedDK, actualDK) == 1
 }
 
-func verifyPBKDF2(encoded string, candidate []byte) bool {
-	parts := strings.Split(encoded, "$")
-	if len(parts) != 2 {
-		return false
+// hashNeedsUpgrade reports whether stored was written with other than the current KDF parameters.
+func hashNeedsUpgrade(stored string) bool {
+	iter, _, _, ok := parsePBKDF2Hash(stored)
+	return ok && iter != pbkdf2Iter
+}
+
+func parsePBKDF2Hash(stored string) (int, []byte, []byte, bool) {
+	if !strings.HasPrefix(stored, hashPrefix) {
+		return 0, nil, nil, false
+	}
+	parts := strings.Split(strings.TrimPrefix(stored, hashPrefix), "$")
+	iter := legacyPBKDF2Iter
+	switch len(parts) {
+	case 2:
+	case 3:
+		n, err := strconv.Atoi(parts[0])
+		if err != nil || !validIterations(n) {
+			return 0, nil, nil, false
+		}
+		iter, parts = n, parts[1:]
+	default:
+		return 0, nil, nil, false
 	}
 	salt, err := hex.DecodeString(parts[0])
 	if err != nil || len(salt) != saltSize {
-		return false
+		return 0, nil, nil, false
 	}
-	expectedDK, err := hex.DecodeString(parts[1])
-	if err != nil || len(expectedDK) != derivedKeySize {
-		return false
+	dk, err := hex.DecodeString(parts[1])
+	if err != nil || len(dk) != derivedKeySize {
+		return 0, nil, nil, false
 	}
-	actualDK := pbkdf2SHA256(candidate, salt, pbkdf2Iter, derivedKeySize)
-	return subtle.ConstantTimeCompare(expectedDK, actualDK) == 1
+	return iter, salt, dk, true
 }
 
 func pbkdf2SHA256(password, salt []byte, iter, keyLen int) []byte {
@@ -311,14 +346,16 @@ func encryptFileWithSecret(content, secret []byte) error {
 	if _, err := randRead(rand.Reader, salt); err != nil {
 		return fmt.Errorf("generate salt: %w", err)
 	}
-	key := deriveEncryptionKey(secret, salt)
+	key := deriveEncryptionKey(secret, salt, pbkdf2Iter)
 	defer func() {
 		for i := range key {
 			key[i] = 0
 		}
 	}()
-	prefix := make([]byte, 0, len(v2Magic)+saltSize)
-	prefix = append(prefix, v2Magic...)
+	// v3 header: magic | uint32 big-endian PBKDF2 iterations | salt.
+	prefix := make([]byte, 0, len(v3Magic)+iterFieldSize+saltSize)
+	prefix = append(prefix, v3Magic...)
+	prefix = binary.BigEndian.AppendUint32(prefix, uint32(pbkdf2Iter))
 	prefix = append(prefix, salt...)
 	if err := encryptFileWithRawKey(content, key, prefix); err != nil {
 		return err
@@ -375,29 +412,58 @@ func GoToHomeDir() {
 }
 
 func readPwdFile() ([]byte, error) {
+	plain, _, err := readPwdFileWithIter()
+	return plain, err
+}
+
+// readPwdFileWithIter decrypts the store and returns the PBKDF2 iteration count it
+// was encrypted with (0 for stores encrypted with the legacy raw key file).
+func readPwdFileWithIter() ([]byte, int, error) {
 	pwdPath, err := resolveHomePath(PwdFileName)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	cipherText, err := readSensitiveFile(pwdPath)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
+	}
+	if bytes.HasPrefix(cipherText, []byte(v3Magic)) {
+		return decryptV3(cipherText[len(v3Magic):])
 	}
 	if bytes.HasPrefix(cipherText, []byte(v2Magic)) {
-		return decryptV2(cipherText[len(v2Magic):])
+		plain, err := decryptV2(cipherText[len(v2Magic):])
+		return plain, legacyPBKDF2Iter, err
 	}
 	keyPath, err := resolveHomePath(PwdFileKey)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	key, err := readSensitiveFile(keyPath)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
-	return decryptWithKey(cipherText, key)
+	plain, err := decryptWithKey(cipherText, key)
+	return plain, 0, err
+}
+
+func decryptV3(payload []byte) ([]byte, int, error) {
+	if len(payload) < iterFieldSize {
+		return nil, 0, errors.New("ciphertext too short")
+	}
+	iter64 := uint64(binary.BigEndian.Uint32(payload[:iterFieldSize]))
+	if iter64 > maxPBKDF2Iter || !validIterations(int(iter64)) {
+		return nil, 0, fmt.Errorf("unsupported PBKDF2 iteration count %d in store header", iter64)
+	}
+	iter := int(iter64)
+	plain, err := decryptWithDerivedKey(payload[iterFieldSize:], iter)
+	return plain, iter, err
 }
 
 func decryptV2(payload []byte) ([]byte, error) {
+	return decryptWithDerivedKey(payload, legacyPBKDF2Iter)
+}
+
+func decryptWithDerivedKey(payload []byte, iter int) ([]byte, error) {
 	if len(payload) < saltSize {
 		return nil, errors.New("ciphertext too short")
 	}
@@ -406,7 +472,7 @@ func decryptV2(payload []byte) ([]byte, error) {
 		return nil, errors.New("master password required to decrypt store")
 	}
 	salt := payload[:saltSize]
-	key := deriveEncryptionKey(secret, salt)
+	key := deriveEncryptionKey(secret, salt, iter)
 	defer func() {
 		for i := range key {
 			key[i] = 0
@@ -437,20 +503,47 @@ func decryptWithKey(cipherText, key []byte) ([]byte, error) {
 }
 
 func GetPwdObj() (model.PwdFile, error) {
+	content, _, err := getPwdObjWithIter()
+	return content, err
+}
+
+func getPwdObjWithIter() (model.PwdFile, int, error) {
 	content := model.PwdFile{}
 
-	fileContent, err := readPwdFile()
+	fileContent, iter, err := readPwdFileWithIter()
 	if err != nil {
-		return content, err
+		return content, 0, err
 	}
 
 	err = json.Unmarshal(fileContent, &content)
 	if err != nil {
 		fmt.Println(err)
-		return content, err
+		return content, 0, err
 	}
 
-	return content, nil
+	return content, iter, nil
+}
+
+// upgradeKDFIfNeeded re-hashes the master password and re-encrypts the store with
+// the current KDF parameters after a successful unlock with older ones.
+func upgradeKDFIfNeeded(pwdObj *model.PwdFile, password []byte, storeIter int) error {
+	rehash := hashNeedsUpgrade(pwdObj.MasterPassword)
+	if !rehash && storeIter == pbkdf2Iter {
+		return nil
+	}
+	upgraded := *pwdObj
+	if rehash {
+		hashed, err := HashMasterPassword(password)
+		if err != nil {
+			return fmt.Errorf("rehash master password: %w", err)
+		}
+		upgraded.MasterPassword = hashed
+	}
+	if err := SaveFileErr(upgraded, nil); err != nil {
+		return fmt.Errorf("re-encrypt store with current KDF parameters: %w", err)
+	}
+	*pwdObj = upgraded
+	return nil
 }
 
 func PromptPasswordErr(textForPrompt string) ([]byte, error) {
@@ -518,7 +611,7 @@ func GetPwdObjAfterCheckMaster() (model.PwdFile, error) {
 	}
 	pwd := PromptPassword("Enter your master password:")
 	SetMasterKey(pwd)
-	pwdObj, err := GetPwdObj()
+	pwdObj, storeIter, err := getPwdObjWithIter()
 	if err != nil {
 		SetMasterKey(nil)
 		if errors.Is(err, errDecryptFailed) {
@@ -530,6 +623,10 @@ func GetPwdObjAfterCheckMaster() (model.PwdFile, error) {
 	if !VerifyMasterPassword(pwdObj.MasterPassword, pwd) {
 		SetMasterKey(nil)
 		return model.PwdFile{}, fmt.Errorf("master passwords do not match")
+	}
+	if err := upgradeKDFIfNeeded(&pwdObj, pwd, storeIter); err != nil {
+		SetMasterKey(nil)
+		return model.PwdFile{}, err
 	}
 	return pwdObj, nil
 }

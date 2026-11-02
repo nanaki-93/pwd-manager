@@ -292,8 +292,8 @@ func TestV2EncryptionLifecycle_RequiresMasterPasswordAndRemovesKeyFile(t *testin
 	if err != nil {
 		t.Fatalf("read encrypted store: %v", err)
 	}
-	if !bytes.HasPrefix(rawStore, []byte(v2Magic)) {
-		t.Fatalf("expected encrypted store to start with %q magic header", v2Magic)
+	if !bytes.HasPrefix(rawStore, []byte(v3Magic)) {
+		t.Fatalf("expected encrypted store to start with %q magic header", v3Magic)
 	}
 
 	SetMasterKey(nil)
