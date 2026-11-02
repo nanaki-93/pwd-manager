@@ -677,7 +677,10 @@ func GetPwdObjAfterCheckMaster() (model.PwdFile, error) {
 		ManageErrorAndExit(err)
 		return model.PwdFile{}, err
 	}
-	if !VerifyMasterPassword(pwdObj.MasterPassword, pwd) {
+	// A positive storeIter means the store was AES-GCM authenticated with a key
+	// derived from pwd, which already proves the password; skip a second PBKDF2.
+	// Legacy key-file stores (storeIter 0) decrypt without it, so check the hash.
+	if storeIter == 0 && !VerifyMasterPassword(pwdObj.MasterPassword, pwd) {
 		SetMasterKey(nil)
 		return model.PwdFile{}, fmt.Errorf("master passwords do not match")
 	}

@@ -369,33 +369,6 @@ func TestGetPwdObjAfterCheckMaster_PromptsBeforeDecryptAndRejectsWrongPassword(t
 	}
 }
 
-func TestGetPwdObjAfterCheckMaster_RejectsMismatchedStoredHash(t *testing.T) {
-	withTempHome(t)
-	encryptionSecret := []byte("encryption-secret")
-	otherHash, err := HashMasterPassword([]byte("different-stored-hash-secret"))
-	if err != nil {
-		t.Fatalf("HashMasterPassword: %v", err)
-	}
-
-	SetMasterKey(encryptionSecret)
-	if err := SaveFileErr(model.PwdFile{MasterPassword: otherHash}, nil); err != nil {
-		t.Fatalf("SaveFileErr: %v", err)
-	}
-	SetMasterKey(nil)
-
-	restoreStdin := SetReadPasswordStdin(func() ([]byte, error) {
-		return encryptionSecret, nil
-	})
-	defer restoreStdin()
-
-	if _, err := GetPwdObjAfterCheckMaster(); err == nil || !strings.Contains(err.Error(), "master passwords do not match") {
-		t.Fatalf("expected mismatch error when stored hash differs from encryption secret, got %v", err)
-	}
-	if getMasterKey() != nil {
-		t.Fatalf("expected session master key to be cleared when VerifyMasterPassword fails")
-	}
-}
-
 func TestDecryptV2_BoundaryInputs(t *testing.T) {
 	SetMasterKey([]byte("boundary-test-secret"))
 	defer SetMasterKey(nil)
