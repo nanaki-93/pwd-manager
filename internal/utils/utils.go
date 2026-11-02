@@ -62,14 +62,28 @@ var (
 
 	masterKeyMu      sync.RWMutex
 	sessionMasterKey []byte
+	// sessionDerived caches the salt and store key derived from sessionMasterKey at
+	// pbkdf2Iter so saves in one session skip PBKDF2. Guarded by masterKeyMu and
+	// wiped whenever the master key changes.
+	sessionDerived *derivedKey
 )
 
+type derivedKey struct {
+	salt []byte
+	key  []byte
+}
+
 // SetMasterKey sets the active master password in memory for deriving the store encryption key.
+// Any cached derived store key is wiped, so a new password always re-derives.
 func SetMasterKey(password []byte) {
 	masterKeyMu.Lock()
 	defer masterKeyMu.Unlock()
 	for i := range sessionMasterKey {
 		sessionMasterKey[i] = 0
+	}
+	if sessionDerived != nil {
+		wipeBytes(sessionDerived.key)
+		sessionDerived = nil
 	}
 	if len(password) == 0 {
 		sessionMasterKey = nil
@@ -85,6 +99,37 @@ func getMasterKey() []byte {
 		return nil
 	}
 	return append([]byte(nil), sessionMasterKey...)
+}
+
+// cacheDerivedKey remembers key (derived from secret and salt at pbkdf2Iter) for
+// reuse by later saves, but only while secret is still the session master key.
+func cacheDerivedKey(secret, salt, key []byte, iter int) {
+	if iter != pbkdf2Iter {
+		return
+	}
+	masterKeyMu.Lock()
+	defer masterKeyMu.Unlock()
+	if len(sessionMasterKey) == 0 || subtle.ConstantTimeCompare(secret, sessionMasterKey) != 1 {
+		return
+	}
+	if sessionDerived != nil {
+		wipeBytes(sessionDerived.key)
+	}
+	sessionDerived = &derivedKey{
+		salt: append([]byte(nil), salt...),
+		key:  append([]byte(nil), key...),
+	}
+}
+
+// getCachedDerivedKey returns copies of the cached salt and key derived from
+// secret, or nils when there is none for it.
+func getCachedDerivedKey(secret []byte) ([]byte, []byte) {
+	masterKeyMu.RLock()
+	defer masterKeyMu.RUnlock()
+	if sessionDerived == nil || subtle.ConstantTimeCompare(secret, sessionMasterKey) != 1 {
+		return nil, nil
+	}
+	return append([]byte(nil), sessionDerived.salt...), append([]byte(nil), sessionDerived.key...)
 }
 
 // wipeBytes overwrites b with zeros so secret copies do not linger on the heap.
@@ -346,17 +391,19 @@ func encryptFile(content []byte) error {
 	return encryptFileWithSecret(content, secret)
 }
 
+// encryptFileWithSecret reuses the session's cached salt and derived key when
+// available; the random GCM nonce still makes every write's ciphertext unique.
 func encryptFileWithSecret(content, secret []byte) error {
-	salt := make([]byte, saltSize)
-	if _, err := randRead(rand.Reader, salt); err != nil {
-		return fmt.Errorf("generate salt: %w", err)
-	}
-	key := deriveEncryptionKey(secret, salt, pbkdf2Iter)
-	defer func() {
-		for i := range key {
-			key[i] = 0
+	salt, key := getCachedDerivedKey(secret)
+	if key == nil {
+		salt = make([]byte, saltSize)
+		if _, err := randRead(rand.Reader, salt); err != nil {
+			return fmt.Errorf("generate salt: %w", err)
 		}
-	}()
+		key = deriveEncryptionKey(secret, salt, pbkdf2Iter)
+		cacheDerivedKey(secret, salt, key, pbkdf2Iter)
+	}
+	defer wipeBytes(key)
 	// v3 header: magic | uint32 big-endian PBKDF2 iterations | salt.
 	prefix := make([]byte, 0, len(v3Magic)+iterFieldSize+saltSize)
 	prefix = append(prefix, v3Magic...)
@@ -479,12 +526,14 @@ func decryptWithDerivedKey(payload []byte, iter int) ([]byte, error) {
 	}
 	salt := payload[:saltSize]
 	key := deriveEncryptionKey(secret, salt, iter)
-	defer func() {
-		for i := range key {
-			key[i] = 0
-		}
-	}()
-	return decryptWithKey(payload[saltSize:], key)
+	defer wipeBytes(key)
+	plain, err := decryptWithKey(payload[saltSize:], key)
+	if err != nil {
+		return nil, err
+	}
+	// Only a key that just authenticated the store is cached for later saves.
+	cacheDerivedKey(secret, salt, key, iter)
+	return plain, nil
 }
 
 func decryptWithKey(cipherText, key []byte) ([]byte, error) {

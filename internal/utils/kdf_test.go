@@ -53,6 +53,87 @@ func readStoreIterations(t *testing.T, home string) int {
 	return int(binary.BigEndian.Uint32(raw[len(v3Magic):]))
 }
 
+func readStoreSalt(t *testing.T, home string) []byte {
+	t.Helper()
+	raw, err := os.ReadFile(filepath.Join(home, PwdFileName))
+	if err != nil {
+		t.Fatalf("read store: %v", err)
+	}
+	start := len(v3Magic) + iterFieldSize
+	if !bytes.HasPrefix(raw, []byte(v3Magic)) || len(raw) < start+saltSize {
+		t.Fatalf("store is not a v3 store")
+	}
+	return append([]byte(nil), raw[start:start+saltSize]...)
+}
+
+func TestSaveFile_ReusesDerivedKeyWithinSession(t *testing.T) {
+	home := withTempHome(t)
+	secret := []byte("cached-key-secret")
+	SetMasterKey(secret)
+	defer SetMasterKey(nil)
+	if err := SaveFileErr(model.PwdFile{MasterPassword: "first"}, nil); err != nil {
+		t.Fatalf("first save: %v", err)
+	}
+	firstSalt := readStoreSalt(t, home)
+	firstRaw, _ := os.ReadFile(filepath.Join(home, PwdFileName))
+
+	// A fresh session that loads then saves must reuse the key derived on decrypt.
+	SetMasterKey(nil)
+	SetMasterKey(secret)
+	if _, err := GetPwdObj(); err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if err := SaveFileErr(model.PwdFile{MasterPassword: "second"}, nil); err != nil {
+		t.Fatalf("second save: %v", err)
+	}
+	if !bytes.Equal(readStoreSalt(t, home), firstSalt) {
+		t.Fatalf("save after load re-derived the key with a fresh salt")
+	}
+	secondRaw, _ := os.ReadFile(filepath.Join(home, PwdFileName))
+	if bytes.Equal(firstRaw, secondRaw) {
+		t.Fatalf("writes with the cached key must still produce unique ciphertext")
+	}
+
+	SetMasterKey(nil)
+	masterKeyMu.RLock()
+	cleared := sessionDerived == nil
+	masterKeyMu.RUnlock()
+	if !cleared {
+		t.Fatalf("SetMasterKey(nil) must clear the cached derived key")
+	}
+	SetMasterKey(secret)
+	got, err := GetPwdObj()
+	if err != nil || got.MasterPassword != "second" {
+		t.Fatalf("store written with cached key does not decrypt: %+v, %v", got, err)
+	}
+}
+
+func TestSaveFile_PasswordChangeReDerivesKey(t *testing.T) {
+	home := withTempHome(t)
+	SetMasterKey([]byte("old-secret"))
+	defer SetMasterKey(nil)
+	if err := SaveFileErr(model.PwdFile{MasterPassword: "a"}, nil); err != nil {
+		t.Fatalf("save: %v", err)
+	}
+	oldSalt := readStoreSalt(t, home)
+	SetMasterKey([]byte("new-secret"))
+	if err := SaveFileErr(model.PwdFile{MasterPassword: "b"}, nil); err != nil {
+		t.Fatalf("save with new password: %v", err)
+	}
+	if bytes.Equal(readStoreSalt(t, home), oldSalt) {
+		t.Fatalf("changing the password must re-derive the key with a fresh salt")
+	}
+	SetMasterKey(nil)
+	SetMasterKey([]byte("new-secret"))
+	if got, err := GetPwdObj(); err != nil || got.MasterPassword != "b" {
+		t.Fatalf("store not readable with new password: %+v, %v", got, err)
+	}
+	SetMasterKey([]byte("old-secret"))
+	if _, err := GetPwdObj(); err == nil {
+		t.Fatalf("store must not decrypt with the old password")
+	}
+}
+
 func hashIterations(t *testing.T, stored string) int {
 	t.Helper()
 	parts := strings.Split(strings.TrimPrefix(stored, hashPrefix), "$")
