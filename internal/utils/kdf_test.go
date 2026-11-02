@@ -129,7 +129,7 @@ func TestGetPwdObjAfterCheckMaster_UpgradesLegacyStore(t *testing.T) {
 	}
 	writeLegacyV2Store(t, secret, original)
 
-	restore := SetReadPasswordStdin(func() ([]byte, error) { return secret, nil })
+	restore := SetReadPasswordStdin(func() ([]byte, error) { return append([]byte(nil), secret...), nil })
 	defer restore()
 
 	got, err := GetPwdObjAfterCheckMaster()

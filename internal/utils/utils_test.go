@@ -353,7 +353,7 @@ func TestGetPwdObjAfterCheckMaster_PromptsBeforeDecryptAndRejectsWrongPassword(t
 	}
 
 	restoreStdinCorrect := SetReadPasswordStdin(func() ([]byte, error) {
-		return masterSecret, nil
+		return append([]byte(nil), masterSecret...), nil
 	})
 	defer restoreStdinCorrect()
 
@@ -655,6 +655,37 @@ func BenchmarkPBKDF2SHA256(b *testing.B) {
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		_ = pbkdf2SHA256(password, salt, 1000, derivedKeySize)
+	}
+}
+
+func TestGetPwdObjAfterCheckMaster_WipesPromptedPassword(t *testing.T) {
+	withTempHome(t)
+	masterSecret := []byte("wipe-prompt-secret")
+	hashed, err := HashMasterPassword(masterSecret)
+	if err != nil {
+		t.Fatalf("HashMasterPassword: %v", err)
+	}
+	SetMasterKey(masterSecret)
+	if err := SaveFileErr(model.PwdFile{MasterPassword: hashed}, nil); err != nil {
+		t.Fatalf("SaveFileErr: %v", err)
+	}
+	SetMasterKey(nil)
+	defer SetMasterKey(nil)
+
+	for _, input := range []string{"wrong-password", string(masterSecret)} {
+		var prompted []byte
+		restore := SetReadPasswordStdin(func() ([]byte, error) {
+			prompted = []byte(input)
+			return prompted, nil
+		})
+		_, _ = GetPwdObjAfterCheckMaster()
+		restore()
+		if len(prompted) == 0 || !bytes.Equal(prompted, make([]byte, len(prompted))) {
+			t.Fatalf("prompted password %q was not wiped after unlock attempt", prompted)
+		}
+	}
+	if !bytes.Equal(getMasterKey(), masterSecret) {
+		t.Fatalf("session master key must stay usable after wiping the prompted buffer")
 	}
 }
 

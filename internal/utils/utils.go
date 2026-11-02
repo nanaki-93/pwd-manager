@@ -87,6 +87,13 @@ func getMasterKey() []byte {
 	return append([]byte(nil), sessionMasterKey...)
 }
 
+// wipeBytes overwrites b with zeros so secret copies do not linger on the heap.
+func wipeBytes(b []byte) {
+	for i := range b {
+		b[i] = 0
+	}
+}
+
 func deriveEncryptionKey(secret, salt []byte, iter int) []byte {
 	domainSalt := make([]byte, 0, len(salt)+len("enc-v2")+1)
 	domainSalt = append(domainSalt, salt...)
@@ -332,6 +339,7 @@ func removeSensitiveFileIfPresent(path string) error {
 // next to the vault.
 func encryptFile(content []byte) error {
 	secret := getMasterKey()
+	defer wipeBytes(secret)
 	if len(secret) == 0 {
 		return fmt.Errorf("save store: %w", ErrMasterKeyRequired)
 	}
@@ -465,6 +473,7 @@ func decryptWithDerivedKey(payload []byte, iter int) ([]byte, error) {
 		return nil, errors.New("ciphertext too short")
 	}
 	secret := getMasterKey()
+	defer wipeBytes(secret)
 	if len(secret) == 0 {
 		return nil, errors.New("master password required to decrypt store")
 	}
@@ -607,6 +616,8 @@ func GetPwdObjAfterCheckMaster() (model.PwdFile, error) {
 		return model.PwdFile{}, err
 	}
 	pwd := PromptPassword("Enter your master password:")
+	// SetMasterKey keeps its own copy; the prompted buffer is wiped on return.
+	defer wipeBytes(pwd)
 	SetMasterKey(pwd)
 	pwdObj, storeIter, err := getPwdObjWithIter()
 	if err != nil {
