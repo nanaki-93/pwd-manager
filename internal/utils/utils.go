@@ -57,6 +57,8 @@ var (
 	errDecryptFailed = errors.New("decrypt file err")
 	ErrSymlink       = errors.New("refusing to access symlink")
 	ErrNonRegular    = errors.New("refusing to access non-regular file")
+	// ErrMasterKeyRequired is returned when saving the store without a master password in memory.
+	ErrMasterKeyRequired = errors.New("master password required to encrypt store")
 
 	masterKeyMu      sync.RWMutex
 	sessionMasterKey []byte
@@ -325,20 +327,15 @@ func removeSensitiveFileIfPresent(path string) error {
 	return nil
 }
 
+// encryptFile always writes the password-derived format. It never falls back to
+// the legacy on-disk key file, which would downgrade the store and leave the key
+// next to the vault.
 func encryptFile(content []byte) error {
 	secret := getMasterKey()
-	if len(secret) > 0 {
-		return encryptFileWithSecret(content, secret)
+	if len(secret) == 0 {
+		return fmt.Errorf("save store: %w", ErrMasterKeyRequired)
 	}
-	keyPath, err := resolveHomePath(PwdFileKey)
-	if err != nil {
-		return err
-	}
-	key, err := readSensitiveFile(keyPath)
-	if err != nil {
-		return fmt.Errorf("read key file: %w", err)
-	}
-	return encryptFileWithRawKey(content, key, nil)
+	return encryptFileWithSecret(content, secret)
 }
 
 func encryptFileWithSecret(content, secret []byte) error {

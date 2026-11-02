@@ -562,8 +562,50 @@ func assertKeySymlinkRejected(t *testing.T, keyPath, externalTarget string) {
 	}
 
 	SetMasterKey(nil)
-	if err := SaveFileErr(model.PwdFile{MasterPassword: "hash"}, nil); !errors.Is(err, ErrSymlink) {
-		t.Fatalf("expected legacy SaveFileErr to refuse reading symlink key file with ErrSymlink, got %v", err)
+	if err := SaveFileErr(model.PwdFile{MasterPassword: "hash"}, nil); !errors.Is(err, ErrMasterKeyRequired) {
+		t.Fatalf("expected SaveFileErr without master key to fail with ErrMasterKeyRequired, got %v", err)
+	}
+}
+
+func TestSaveFile_NoMasterKeyRefusesLegacyKeyFileFallback(t *testing.T) {
+	tmpHome := withTempHome(t)
+	keyPath := filepath.Join(tmpHome, PwdFileKey)
+	if err := os.WriteFile(keyPath, bytes.Repeat([]byte{0x5a}, 32), 0600); err != nil {
+		t.Fatalf("write legacy key file: %v", err)
+	}
+	SetMasterKey(nil)
+	if err := SaveFileErr(model.PwdFile{MasterPassword: "hash"}, nil); !errors.Is(err, ErrMasterKeyRequired) {
+		t.Fatalf("expected ErrMasterKeyRequired, got %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(tmpHome, PwdFileName)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("expected no store written without master key, stat err: %v", err)
+	}
+}
+
+func TestSaveFile_V3StoreNeverRewrittenWithoutMarker(t *testing.T) {
+	tmpHome := withTempHome(t)
+	storePath := filepath.Join(tmpHome, PwdFileName)
+	SetMasterKey([]byte("marker-secret"))
+	if err := SaveFileErr(model.PwdFile{MasterPassword: "hash"}, nil); err != nil {
+		t.Fatalf("SaveFileErr: %v", err)
+	}
+	before, err := os.ReadFile(storePath)
+	if err != nil {
+		t.Fatalf("read store: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(tmpHome, PwdFileKey), bytes.Repeat([]byte{0x5a}, 32), 0600); err != nil {
+		t.Fatalf("write legacy key file: %v", err)
+	}
+	SetMasterKey(nil)
+	if err := SaveFileErr(model.PwdFile{MasterPassword: "other"}, nil); err == nil {
+		t.Fatalf("expected save without master key to fail")
+	}
+	after, err := os.ReadFile(storePath)
+	if err != nil {
+		t.Fatalf("read store after failed save: %v", err)
+	}
+	if !bytes.HasPrefix(after, []byte(v3Magic)) || !bytes.Equal(before, after) {
+		t.Fatalf("store was rewritten without the format marker")
 	}
 }
 
