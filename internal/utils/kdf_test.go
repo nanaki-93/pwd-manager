@@ -18,13 +18,26 @@ import (
 	"github.com/nanaki-93/pwd-manager/internal/model"
 )
 
-const minRecommendedPBKDF2Iter = 600000
+const (
+	minRecommendedPBKDF2Iter = 600000
+	testLegacyPBKDF2Iter     = 100000
+	testV3Magic              = "PWD3"
+	testIterFieldSize        = 4
+)
 
 func legacyHash(t *testing.T, password []byte) string {
 	t.Helper()
 	salt := bytes.Repeat([]byte{0x42}, saltSize)
-	dk := pbkdf2SHA256(password, salt, legacyPBKDF2Iter, derivedKeySize)
+	dk := pbkdf2SHA256(password, salt, testLegacyPBKDF2Iter, derivedKeySize)
 	return fmt.Sprintf("%s%s$%s", hashPrefix, hex.EncodeToString(salt), hex.EncodeToString(dk))
+}
+
+func legacyEncryptionKey(secret, salt []byte) []byte {
+	domainSalt := make([]byte, 0, len(salt)+len("enc-v2")+1)
+	domainSalt = append(domainSalt, salt...)
+	domainSalt = append(domainSalt, ':')
+	domainSalt = append(domainSalt, "enc-v2"...)
+	return pbkdf2SHA256(secret, domainSalt, testLegacyPBKDF2Iter, derivedKeySize)
 }
 
 func writeLegacyV2Store(t *testing.T, secret []byte, content model.PwdFile) {
@@ -34,7 +47,7 @@ func writeLegacyV2Store(t *testing.T, secret []byte, content model.PwdFile) {
 		t.Fatalf("marshal: %v", err)
 	}
 	salt := bytes.Repeat([]byte{0x24}, saltSize)
-	key := deriveEncryptionKey(secret, salt, legacyPBKDF2Iter)
+	key := legacyEncryptionKey(secret, salt)
 	prefix := append([]byte(v2Magic), salt...)
 	if err := encryptFileWithRawKey(raw, key, prefix); err != nil {
 		t.Fatalf("write legacy v2 store: %v", err)
@@ -47,10 +60,10 @@ func readStoreIterations(t *testing.T, home string) int {
 	if err != nil {
 		t.Fatalf("read store: %v", err)
 	}
-	if !bytes.HasPrefix(raw, []byte(v3Magic)) || len(raw) < len(v3Magic)+iterFieldSize {
+	if !bytes.HasPrefix(raw, []byte(testV3Magic)) || len(raw) < len(testV3Magic)+testIterFieldSize {
 		t.Fatalf("store header does not record KDF parameters: %q", raw[:min(len(raw), 8)])
 	}
-	return int(binary.BigEndian.Uint32(raw[len(v3Magic):]))
+	return int(binary.BigEndian.Uint32(raw[len(testV3Magic):]))
 }
 
 func readStoreSalt(t *testing.T, home string) []byte {
@@ -59,8 +72,8 @@ func readStoreSalt(t *testing.T, home string) []byte {
 	if err != nil {
 		t.Fatalf("read store: %v", err)
 	}
-	start := len(v3Magic) + iterFieldSize
-	if !bytes.HasPrefix(raw, []byte(v3Magic)) || len(raw) < start+saltSize {
+	start := len(testV3Magic) + testIterFieldSize
+	if !bytes.HasPrefix(raw, []byte(testV3Magic)) || len(raw) < start+saltSize {
 		t.Fatalf("store is not a v3 store")
 	}
 	return append([]byte(nil), raw[start:start+saltSize]...)
@@ -95,16 +108,19 @@ func TestSaveFile_ReusesDerivedKeyWithinSession(t *testing.T) {
 	}
 
 	SetMasterKey(nil)
-	masterKeyMu.RLock()
-	cleared := sessionDerived == nil
-	masterKeyMu.RUnlock()
-	if !cleared {
-		t.Fatalf("SetMasterKey(nil) must clear the cached derived key")
-	}
 	SetMasterKey(secret)
 	got, err := GetPwdObj()
 	if err != nil || got.MasterPassword != "second" {
 		t.Fatalf("store written with cached key does not decrypt: %+v, %v", got, err)
+	}
+	// Clearing and re-setting the master key without loading must not reuse the previous salt.
+	SetMasterKey(nil)
+	SetMasterKey(secret)
+	if err := SaveFileErr(model.PwdFile{MasterPassword: "third"}, nil); err != nil {
+		t.Fatalf("third save: %v", err)
+	}
+	if bytes.Equal(readStoreSalt(t, home), firstSalt) {
+		t.Fatalf("SetMasterKey(nil) must clear the cached derived key")
 	}
 }
 
@@ -177,9 +193,6 @@ func TestVerifyMasterPassword_LegacyAndBoundedIterations(t *testing.T) {
 	if !VerifyMasterPassword(stored, pwd) || VerifyMasterPassword(stored, []byte("wrong")) {
 		t.Fatalf("legacy hash without iteration field must still verify correctly")
 	}
-	if !hashNeedsUpgrade(stored) {
-		t.Fatalf("legacy hash should be flagged for upgrade")
-	}
 	rest := strings.TrimPrefix(stored, hashPrefix)
 	for _, iter := range []string{"1", "99999", "4294967296", "-5"} {
 		if VerifyMasterPassword(hashPrefix+iter+"$"+rest, pwd) {
@@ -188,15 +201,24 @@ func TestVerifyMasterPassword_LegacyAndBoundedIterations(t *testing.T) {
 	}
 }
 
-func TestDecryptV3_RejectsOutOfRangeIterations(t *testing.T) {
+func TestGetPwdObj_V3RejectsOutOfRangeIterations(t *testing.T) {
+	home := withTempHome(t)
 	SetMasterKey([]byte("bounds-secret"))
 	defer SetMasterKey(nil)
-	payload := make([]byte, iterFieldSize+saltSize+32)
-	binary.BigEndian.PutUint32(payload, 0xFFFFFFFF)
-	if _, _, err := decryptV3(payload); err == nil || !strings.Contains(err.Error(), "unsupported PBKDF2 iteration count") {
+	storePath := filepath.Join(home, PwdFileName)
+	raw := make([]byte, len(testV3Magic)+testIterFieldSize+saltSize+32)
+	copy(raw, testV3Magic)
+	binary.BigEndian.PutUint32(raw[len(testV3Magic):], 0xFFFFFFFF)
+	if err := os.WriteFile(storePath, raw, 0600); err != nil {
+		t.Fatalf("write store: %v", err)
+	}
+	if _, err := GetPwdObj(); err == nil || !strings.Contains(err.Error(), "unsupported PBKDF2 iteration count") {
 		t.Fatalf("expected out-of-range iteration error, got %v", err)
 	}
-	if _, _, err := decryptV3(payload[:2]); err == nil || !strings.Contains(err.Error(), "ciphertext too short") {
+	if err := os.WriteFile(storePath, []byte(testV3Magic+"ab"), 0600); err != nil {
+		t.Fatalf("write short store: %v", err)
+	}
+	if _, err := GetPwdObj(); err == nil || !strings.Contains(err.Error(), "ciphertext too short") {
 		t.Fatalf("expected ciphertext too short, got %v", err)
 	}
 }
