@@ -673,12 +673,10 @@ func (h *concurrentClipboardHarness) read() (string, error) {
 	return h.currentClipboard, nil
 }
 
-// nonBlockingCopyGuard only bounds a hung copy; it is not a latency budget.
-const nonBlockingCopyGuard = 5 * time.Second
+const nonBlockingCopyGuard = 5 * time.Second // bounds a hung copy, not latency
 
-// copyCompletesWhileBlocked runs a copy concurrently and requires it to finish
-// before guard fires. On timeout it calls release to unblock the copy, waits
-// for it so no goroutine leaks, and returns an error.
+// copyCompletesWhileBlocked requires a concurrent copy to finish before guard
+// fires; on timeout it calls release and waits for the copy, then errors.
 func copyCompletesWhileBlocked(pwd string, guard time.Duration, release func()) error {
 	done := make(chan error, 1)
 	go func() { done <- copyPasswordToClipboard(pwd) }()
@@ -730,9 +728,11 @@ func TestCopyPasswordToClipboard_SlowWriteDoesNotHoldLockAndCancelsStaleCopy(t *
 	}()
 	<-slowWriteStarted
 
-	assertFastCopyPassword(t, "fast-secret", func() { close(releaseSlowWrite) })
+	release := sync.OnceFunc(func() { close(releaseSlowWrite) })
+	t.Cleanup(release)
+	assertFastCopyPassword(t, "fast-secret", release)
 
-	close(releaseSlowWrite)
+	release()
 	if err := <-firstDone; err != nil {
 		t.Fatalf("unexpected error from first copy: %v", err)
 	}
@@ -779,9 +779,11 @@ func TestCopyPasswordToClipboard_SlowReadOnExpirationDoesNotBlockConcurrentCopyA
 	}()
 	<-slowReadStarted
 
-	assertFastCopyPassword(t, "second-secret", func() { close(releaseSlowRead) })
+	release := sync.OnceFunc(func() { close(releaseSlowRead) })
+	t.Cleanup(release)
+	assertFastCopyPassword(t, "second-secret", release)
 
-	close(releaseSlowRead)
+	release()
 	<-expireDone
 
 	h.mu.Lock()
