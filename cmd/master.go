@@ -127,18 +127,44 @@ func savePassword(currPwdContent model.PwdFile) {
 		utils.ManageErrorAndExit(err)
 		return
 	}
-	if err := generateKey(newPassword); err != nil {
-		clear(newPassword)
-		utils.ManageErrorAndExit(err)
-		return
-	}
-	clear(newPassword)
 	currPwdContent.MasterPassword = hashedPassword
-	if err := utils.SaveFileErr(currPwdContent, nil); err != nil {
+	err = rotateMasterKey(newPassword, currPwdContent)
+	clear(newPassword)
+	if err != nil {
 		utils.ManageErrorAndExit(err)
 		return
 	}
 	fmt.Println("Password saved")
+}
+
+// saveStore re-encrypts and writes the store; a variable so tests can fail it.
+// utils.SaveFileErr writes to a synced temporary file and renames it into place.
+var saveStore = utils.SaveFileErr
+
+// rotateMasterKey derives the key for password and re-saves content with it.
+// Nothing the current store depends on is destroyed before the save succeeds:
+// the legacy key file is removed only afterwards, and on a failed save the new
+// key is dropped from memory so it cannot be used for later saves.
+func rotateMasterKey(password []byte, content model.PwdFile) error {
+	pending, err := prepareKey(password)
+	if err != nil {
+		return err
+	}
+	defer pending.wipe()
+	if err := checkLegacyKeyFile(); err != nil {
+		return err
+	}
+	// The salt is written first so a saved store never depends on an unsaved
+	// salt; an existing salt keeps its bytes and only gains the parameter header.
+	if err := pending.persistSalt(); err != nil {
+		return err
+	}
+	utils.SetMasterKey(pending.key)
+	if err := saveStore(content, nil); err != nil {
+		utils.SetMasterKey(nil)
+		return fmt.Errorf("save store with new master key: %w", err)
+	}
+	return removeLegacyKeyFile()
 }
 
 func validateMasterPassword(password []byte) error {
@@ -157,37 +183,65 @@ func generateKey(password ...[]byte) error {
 	if len(password) > 0 {
 		pwd = password[0]
 	}
-	if err := validateMasterPassword(pwd); err != nil {
+	pending, err := prepareKey(pwd)
+	if err != nil {
 		return err
+	}
+	defer pending.wipe()
+	if err := checkLegacyKeyFile(); err != nil {
+		return err
+	}
+	if err := pending.persistSalt(); err != nil {
+		return err
+	}
+	if err := removeLegacyKeyFile(); err != nil {
+		return err
+	}
+	utils.SetMasterKey(pending.key)
+	return nil
+}
+
+// pendingKey is a derived key that has not been put into use yet.
+type pendingKey struct {
+	salt      []byte
+	key       []byte
+	writeSalt bool
+}
+
+func (p *pendingKey) wipe() {
+	clear(p.salt)
+	clear(p.key)
+}
+
+// persistSalt writes new salts and salt files with outdated parameters with
+// the current KDF parameters.
+func (p *pendingKey) persistSalt() error {
+	if !p.writeSalt {
+		return nil
+	}
+	return writeKeySalt(p.salt)
+}
+
+// prepareKey loads or creates the salt and derives the key for pwd without
+// changing any file or the in-memory master key.
+func prepareKey(pwd []byte) (*pendingKey, error) {
+	if err := validateMasterPassword(pwd); err != nil {
+		return nil, err
 	}
 	utils.GoToHomeDir()
 	fmt.Println("Generating a key to encrypt your file:")
 	salt := make([]byte, keyDerivationSaltLen)
-	defer clear(salt)
-
 	iterations, loaded, err := loadOrCreateKeySalt(salt)
 	if err != nil {
-		return err
+		clear(salt)
+		return nil, err
 	}
-
 	derivedKey, err := deriveKey(pwd, salt)
 	if err != nil {
-		return err
+		clear(salt)
+		return nil, err
 	}
-	defer clear(derivedKey)
-
-	if err := removeLegacyKeyFile(); err != nil {
-		return err
-	}
-	// New salts and salt files with outdated parameters are (re)written with
-	// the current KDF parameters; the new key is used for all later saves.
-	if !loaded || iterations != keyDerivationIterations {
-		if err := writeKeySalt(salt); err != nil {
-			return err
-		}
-	}
-	utils.SetMasterKey(derivedKey)
-	return nil
+	return &pendingKey{salt: salt, key: derivedKey, writeSalt: !loaded || iterations != keyDerivationIterations}, nil
 }
 
 // loadOrCreateKeySalt fills salt from the salt file, or with random bytes when
@@ -259,13 +313,51 @@ func writeKeySalt(salt []byte) error {
 	data = binary.BigEndian.AppendUint32(data, uint32(keyDerivationIterations))
 	data = append(data, salt...)
 	defer clear(data)
-	if err := os.WriteFile(keyDerivationSaltFile, data, 0o600); err != nil {
+	if err := writeFileAtomic(keyDerivationSaltFile, data); err != nil {
 		return fmt.Errorf("write salt file: %w", err)
 	}
 	return nil
 }
 
-func removeLegacyKeyFile() error {
+// writeFileAtomic writes data to a synced temporary file next to path and
+// renames it into place, so an interrupted write never truncates path.
+func writeFileAtomic(path string, data []byte) error {
+	tmp, err := os.CreateTemp(".", path+".tmp-*")
+	if err != nil {
+		return fmt.Errorf("create temp file: %w", err)
+	}
+	tmpName := tmp.Name()
+	if err := writeAndSync(tmp, data); err != nil {
+		_ = os.Remove(tmpName)
+		return err
+	}
+	if err := os.Rename(tmpName, path); err != nil {
+		_ = os.Remove(tmpName)
+		return fmt.Errorf("rename temp file: %w", err)
+	}
+	return nil
+}
+
+func writeAndSync(f *os.File, data []byte) error {
+	err := f.Chmod(0o600)
+	if err == nil {
+		_, err = f.Write(data)
+	}
+	if err == nil {
+		err = f.Sync()
+	}
+	if closeErr := f.Close(); err == nil && closeErr != nil {
+		err = closeErr
+	}
+	if err != nil {
+		return fmt.Errorf("write temp file: %w", err)
+	}
+	return nil
+}
+
+// checkLegacyKeyFile fails when the legacy key path exists but is not a regular
+// file, so rotation stops before anything is written.
+func checkLegacyKeyFile() error {
 	info, err := os.Lstat(utils.PwdFileKey)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
@@ -275,6 +367,13 @@ func removeLegacyKeyFile() error {
 	}
 	if !info.Mode().IsRegular() {
 		return &os.PathError{Op: "remove", Path: utils.PwdFileKey, Err: errors.New("not a regular file")}
+	}
+	return nil
+}
+
+func removeLegacyKeyFile() error {
+	if err := checkLegacyKeyFile(); err != nil {
+		return err
 	}
 	if err := os.Remove(utils.PwdFileKey); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return fmt.Errorf("remove key file: %w", err)
