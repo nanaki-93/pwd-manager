@@ -475,11 +475,11 @@ func TestExecMasterCmdConfirmationBoundariesAndScanError(t *testing.T) {
 
 	exitCount := captureExit(t)
 	feedStdinInput(t, "", func() { execMasterCmd(masterCmd, nil) })
-	if *exitCount == 0 {
-		t.Fatalf("expected ManageErrorAndExit to be called on EOF when scanning confirmation")
+	if *exitCount != 0 {
+		t.Fatalf("expected EOF on confirmation to be treated as a decline, got %d exits", *exitCount)
 	}
 	if afterScanErr, err := utils.GetPwdObj(); err != nil || afterScanErr.MasterPassword != initialLoaded.MasterPassword {
-		t.Fatalf("expected master password to remain unchanged when confirmation scan fails (err=%v)", err)
+		t.Fatalf("expected master password to remain unchanged when confirmation input is closed (err=%v)", err)
 	}
 }
 

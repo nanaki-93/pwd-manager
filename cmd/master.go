@@ -60,11 +60,12 @@ func execMasterCmd(cmd *cobra.Command, args []string) {
 	}
 	if !isToInit {
 		fmt.Println("Do you want to update your master password? (y/n)")
-		_, err := fmt.Scanln(&updatePwd)
+		answer, err := readConfirmation(os.Stdin)
 		if err != nil {
 			utils.ManageErrorAndExit(err)
 			return
 		}
+		updatePwd = answer
 	}
 
 	normalizedUpdate := strings.ToLower(strings.TrimSpace(updatePwd))
@@ -73,6 +74,30 @@ func execMasterCmd(cmd *cobra.Command, args []string) {
 	}
 
 }
+
+// readConfirmation reads one answer line from r a byte at a time, so input meant
+// for later prompts is left unread. An empty line or closed input (EOF) yields
+// an empty answer, which callers treat as a decline; other read errors are returned.
+func readConfirmation(r io.Reader) (string, error) {
+	var line []byte
+	b := make([]byte, 1)
+	for {
+		n, err := r.Read(b)
+		if n > 0 {
+			if b[0] == '\n' {
+				return string(line), nil
+			}
+			line = append(line, b[0])
+		}
+		if errors.Is(err, io.EOF) {
+			return string(line), nil
+		}
+		if err != nil {
+			return "", fmt.Errorf("read update confirmation: %w", err)
+		}
+	}
+}
+
 func savePassword(currPwdContent model.PwdFile) {
 	var currPassword []byte
 	var newPassword []byte
