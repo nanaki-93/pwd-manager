@@ -20,11 +20,28 @@ func removeCaptureDescriptorCount(t *testing.T) int {
 	return 0
 }
 
+// Open and close one pipe so descriptors the runtime creates lazily on first
+// pipe use (such as the network poller's) exist before the baseline count.
+func warmUpRemoveCapturePipe(t *testing.T) {
+	t.Helper()
+	reader, writer, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("warm-up pipe: %v", err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatalf("close warm-up writer: %v", err)
+	}
+	if err := reader.Close(); err != nil {
+		t.Fatalf("close warm-up reader: %v", err)
+	}
+}
+
 func TestCaptureRemoveStdoutFatalChild(t *testing.T) {
 	if os.Getenv("PWD_MANAGER_CAPTURE_FATAL_CHILD") != "1" {
 		return
 	}
 	original := os.Stdout
+	warmUpRemoveCapturePipe(t)
 	before := removeCaptureDescriptorCount(t)
 	var writer *os.File
 	// Registered first so this runs after the capture's reader cleanup.
