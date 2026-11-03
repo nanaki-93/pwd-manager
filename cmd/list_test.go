@@ -4,9 +4,28 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"io"
 	"strings"
 	"testing"
+
+	"github.com/spf13/cobra"
 )
+
+// resetFlagToDefault restores a flag registered on cmd to its default value
+// and clears pflag's Changed marker, so tests that parse flags on the shared
+// command do not leak state into later tests.
+func resetFlagToDefault(cmd *cobra.Command, name string) error {
+	f := cmd.Flags().Lookup(name)
+	if f == nil {
+		return fmt.Errorf("reset flag %q on %q: flag not registered", name, cmd.Name())
+	}
+	if err := f.Value.Set(f.DefValue); err != nil {
+		return fmt.Errorf("reset flag %q on %q to %q: %w", name, cmd.Name(), f.DefValue, err)
+	}
+	f.Changed = false
+	return nil
+}
 
 type errWriter struct {
 	err error
@@ -16,18 +35,52 @@ func (e errWriter) Write(_ []byte) (int, error) {
 	return 0, e.err
 }
 
-type failAfterNWriter struct {
+// failAfterNBytesWriter accepts at most remaining bytes and then fails, so
+// the partial output it records does not depend on how many Write calls the
+// writer under test makes.
+type failAfterNBytesWriter struct {
 	remaining int
 	err       error
 	buf       bytes.Buffer
 }
 
-func (w *failAfterNWriter) Write(p []byte) (int, error) {
-	if w.remaining <= 0 {
-		return 0, w.err
+func (w *failAfterNBytesWriter) Write(p []byte) (int, error) {
+	if len(p) <= w.remaining {
+		w.remaining -= len(p)
+		return w.buf.Write(p)
 	}
-	w.remaining--
-	return w.buf.Write(p)
+	n, _ := w.buf.Write(p[:w.remaining])
+	w.remaining = 0
+	return n, w.err
+}
+
+// byteSplitWriter forwards each byte in its own Write call.
+type byteSplitWriter struct {
+	w io.Writer
+}
+
+func (s byteSplitWriter) Write(p []byte) (int, error) {
+	for i := range p {
+		if _, err := s.w.Write(p[i : i+1]); err != nil {
+			return i, err
+		}
+	}
+	return len(p), nil
+}
+
+// wholeBufferWriter collects all output and forwards it in a single Write.
+type wholeBufferWriter struct {
+	w   io.Writer
+	buf bytes.Buffer
+}
+
+func (b *wholeBufferWriter) Write(p []byte) (int, error) {
+	return b.buf.Write(p)
+}
+
+func (b *wholeBufferWriter) flush() error {
+	_, err := b.w.Write(b.buf.Bytes())
+	return err
 }
 
 func TestWriteListOutput_MasksByDefault(t *testing.T) {
@@ -137,15 +190,50 @@ func TestWriteListOutput_MidStreamWriteError(t *testing.T) {
 		"second": "secret-2",
 	}
 	boom := errors.New("short write on second entry")
-	w := &failAfterNWriter{remaining: 1, err: boom}
+	wantPartial := "first: ********\n"
+	w := &failAfterNBytesWriter{remaining: len(wantPartial), err: boom}
 
 	err := writeListOutput(w, saved, false)
 	if !errors.Is(err, boom) {
 		t.Fatalf("expected wrapped error %v, got %v", boom, err)
 	}
-	if w.buf.String() != "first: ********\n" {
+	if w.buf.String() != wantPartial {
 		t.Fatalf("unexpected partial output before error: %q", w.buf.String())
 	}
+}
+
+func TestWriteListOutput_MidStreamWriteErrorIndependentOfWriteCalls(t *testing.T) {
+	saved := map[string]string{
+		"first":  "secret-1",
+		"second": "secret-2",
+	}
+	boom := errors.New("short write on second entry")
+	wantPartial := "first: ********\n"
+
+	t.Run("split into single-byte writes", func(t *testing.T) {
+		sink := &failAfterNBytesWriter{remaining: len(wantPartial), err: boom}
+		err := writeListOutput(byteSplitWriter{w: sink}, saved, false)
+		if !errors.Is(err, boom) {
+			t.Fatalf("expected wrapped error %v, got %v", boom, err)
+		}
+		if sink.buf.String() != wantPartial {
+			t.Fatalf("unexpected partial output before error: %q", sink.buf.String())
+		}
+	})
+
+	t.Run("whole output in one write", func(t *testing.T) {
+		sink := &failAfterNBytesWriter{remaining: len(wantPartial), err: boom}
+		bw := &wholeBufferWriter{w: sink}
+		if err := writeListOutput(bw, saved, false); err != nil {
+			t.Fatalf("expected no error while buffering, got %v", err)
+		}
+		if err := bw.flush(); !errors.Is(err, boom) {
+			t.Fatalf("expected error %v on flush, got %v", boom, err)
+		}
+		if sink.buf.String() != wantPartial {
+			t.Fatalf("unexpected partial output before error: %q", sink.buf.String())
+		}
+	})
 }
 
 func TestListCmd_ShowFlagRegistered(t *testing.T) {
@@ -164,7 +252,9 @@ func TestListCmd_ShowFlagRegistered(t *testing.T) {
 func TestListCmd_ShowFlagParsing(t *testing.T) {
 	orig := listShowFlag
 	t.Cleanup(func() {
-		_ = listCmd.Flags().Set("show", "false")
+		if err := resetFlagToDefault(listCmd, "show"); err != nil {
+			t.Errorf("cleanup: %v", err)
+		}
 		listShowFlag = orig
 	})
 
@@ -199,7 +289,9 @@ func TestListCmd_JSONFlagRegistered(t *testing.T) {
 func TestListCmd_JSONFlagParsing(t *testing.T) {
 	orig := listJSONFlag
 	t.Cleanup(func() {
-		_ = listCmd.Flags().Set("json", "false")
+		if err := resetFlagToDefault(listCmd, "json"); err != nil {
+			t.Errorf("cleanup: %v", err)
+		}
 		listJSONFlag = orig
 	})
 
@@ -215,6 +307,34 @@ func TestListCmd_JSONFlagParsing(t *testing.T) {
 	}
 	if listJSONFlag {
 		t.Fatal("expected listJSONFlag to be false after parsing --json=false")
+	}
+}
+
+func TestResetFlagToDefault_RestoresValueAndChanged(t *testing.T) {
+	orig := listJSONFlag
+	t.Cleanup(func() { listJSONFlag = orig })
+
+	if err := listCmd.ParseFlags([]string{"--json"}); err != nil {
+		t.Fatalf("unexpected error parsing --json: %v", err)
+	}
+	if err := resetFlagToDefault(listCmd, "json"); err != nil {
+		t.Fatalf("unexpected reset error: %v", err)
+	}
+	if listJSONFlag {
+		t.Fatal("expected listJSONFlag to be false after reset")
+	}
+	if listCmd.Flags().Changed("json") {
+		t.Fatal("expected Changed marker for --json to be cleared after reset")
+	}
+}
+
+func TestResetFlagToDefault_ReportsUnknownFlag(t *testing.T) {
+	err := resetFlagToDefault(listCmd, "no-such-flag")
+	if err == nil {
+		t.Fatal("expected error when resetting an unregistered flag")
+	}
+	if !strings.Contains(err.Error(), "no-such-flag") {
+		t.Fatalf("expected error to name the flag, got %v", err)
 	}
 }
 
@@ -259,14 +379,76 @@ func TestWriteListJSONOutput_ShowsPlaintextWhenFlagSet(t *testing.T) {
 		t.Fatalf("expected no error, got %v", err)
 	}
 
-	var parsed map[string]string
-	if err := json.Unmarshal(buf.Bytes(), &parsed); err != nil {
-		t.Fatalf("output is not valid JSON: %v", err)
+	if err := checkJSONEntries(buf.Bytes(), saved); err != nil {
+		t.Fatalf("unexpected plaintext JSON output %q: %v", buf.String(), err)
 	}
-	for k, want := range saved {
-		if got, ok := parsed[k]; !ok || got != want {
-			t.Fatalf("for key %q: got %q (ok=%v), want %q", k, got, ok, want)
+}
+
+// checkJSONEntries reports whether raw is a JSON object holding exactly the
+// entries of want: no missing, changed, extra or duplicated keys.
+func checkJSONEntries(raw []byte, want map[string]string) error {
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	if tok, err := dec.Token(); err != nil || tok != json.Delim('{') {
+		return fmt.Errorf("expected JSON object start, got %v (err=%v)", tok, err)
+	}
+	seen := make(map[string]bool, len(want))
+	for dec.More() {
+		tok, err := dec.Token()
+		if err != nil {
+			return fmt.Errorf("read key: %w", err)
 		}
+		key, ok := tok.(string)
+		if !ok {
+			return fmt.Errorf("expected string key, got %v", tok)
+		}
+		var val string
+		if err := dec.Decode(&val); err != nil {
+			return fmt.Errorf("decode value for key %q: %w", key, err)
+		}
+		if seen[key] {
+			return fmt.Errorf("duplicated key %q", key)
+		}
+		seen[key] = true
+		exp, ok := want[key]
+		if !ok {
+			return fmt.Errorf("unexpected extra key %q", key)
+		}
+		if val != exp {
+			return fmt.Errorf("for key %q: got %q, want %q", key, val, exp)
+		}
+	}
+	if len(seen) != len(want) {
+		return fmt.Errorf("got %d keys, want %d", len(seen), len(want))
+	}
+	if _, err := dec.Token(); err != nil {
+		return fmt.Errorf("read object end: %w", err)
+	}
+	return nil
+}
+
+func TestCheckJSONEntries_RejectsExtraDuplicateAndMissingKeys(t *testing.T) {
+	want := map[string]string{"email": "hunter2", "github": "s1"}
+	for _, tc := range []struct {
+		name string
+		raw  string
+		ok   bool
+	}{
+		{name: "exact", raw: `{"email":"hunter2","github":"s1"}`, ok: true},
+		{name: "extra key", raw: `{"email":"hunter2","github":"s1","bank":"x"}`},
+		{name: "duplicated key", raw: `{"email":"hunter2","github":"s1","email":"hunter2"}`},
+		{name: "missing key", raw: `{"email":"hunter2"}`},
+		{name: "changed value", raw: `{"email":"hunter2","github":"s2"}`},
+		{name: "not an object", raw: `["email"]`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := checkJSONEntries([]byte(tc.raw), want)
+			if tc.ok && err != nil {
+				t.Fatalf("expected match, got %v", err)
+			}
+			if !tc.ok && err == nil {
+				t.Fatalf("expected mismatch for %s", tc.raw)
+			}
+		})
 	}
 }
 
