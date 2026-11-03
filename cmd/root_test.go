@@ -366,6 +366,59 @@ func TestInitConfigResolvesDefaultConfigThroughUserHomeDir(t *testing.T) {
 	}
 }
 
+func TestLoadConfigNilHomeDirFuncUsesPortableLookup(t *testing.T) {
+	previous := userHomeDir
+	t.Cleanup(func() { userHomeDir = previous })
+	wantErr := errors.New("portable home lookup failed")
+	calls := 0
+	userHomeDir = func() (string, error) {
+		calls++
+		return "", wantErr
+	}
+	cfg := &Config{}
+	if err := LoadConfig(cfg); !errors.Is(err, wantErr) {
+		t.Fatalf("expected wrapped lookup error %v, got %v", wantErr, err)
+	}
+	if calls != 1 {
+		t.Fatalf("expected one home lookup, got %d", calls)
+	}
+}
+
+func TestInitConfigMissingHomeTestPreservesSetHomeAndCommandState(t *testing.T) {
+	for _, home := range []string{"", t.TempDir()} {
+		t.Run("HOME="+home, func(t *testing.T) {
+			t.Setenv("HOME", home)
+			originalFile, originalContext := cfgFile, rootCmd.Context()
+			originalWriter := rootCmd.ErrOrStderr()
+			t.Cleanup(func() {
+				cfgFile = originalFile
+				rootCmd.SetContext(originalContext)
+				rootCmd.SetErr(originalWriter)
+			})
+			cfgFile = "sentinel-config.yaml"
+			ctx := WithConfig(context.Background(), NewConfig("sentinel.yaml"))
+			rootCmd.SetContext(ctx)
+			rootCmd.SetErr(nil)
+			defaultWriter := rootCmd.ErrOrStderr()
+
+			t.Run("inner", TestInitConfigDoesNotExitOnMissingHomeAndUpdatesContextOnSuccess)
+
+			if got, set := os.LookupEnv("HOME"); !set || got != home {
+				t.Fatalf("HOME changed: got (%q, %v), want (%q, true)", got, set, home)
+			}
+			if cfgFile != "sentinel-config.yaml" {
+				t.Fatalf("cfgFile not restored: %q", cfgFile)
+			}
+			if rootCmd.Context() != ctx {
+				t.Fatal("root command context not restored")
+			}
+			if rootCmd.ErrOrStderr() != defaultWriter {
+				t.Fatal("root command error writer not reset to default")
+			}
+		})
+	}
+}
+
 func TestInitConfigMissingHomeTestLeavesUnsetHomeUnset(t *testing.T) {
 	t.Setenv("HOME", "")
 	if err := os.Unsetenv("HOME"); err != nil {
