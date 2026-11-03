@@ -29,7 +29,7 @@ var addCmd = &cobra.Command{
 func init() {
 	rootCmd.AddCommand(addCmd)
 	addCmd.Flags().BoolVarP(&addCopyFlag, "copy", "c", false,
-		"Copy the password to the clipboard (it is not cleared automatically and is readable by other local processes and clipboard history tools)")
+		"Copy the password to the clipboard; the command waits 10s (or Ctrl+C) and then clears it. Until cleared it is readable by other local processes and clipboard history tools")
 }
 
 func readPwdName(r io.Reader) (string, error) {
@@ -158,7 +158,8 @@ func execAddCmd(cmd *cobra.Command, args []string) {
 //     the vault map and in process memory until the garbage collector reuses it.
 //   - The same string (not a new copy) is handed to the vault save, which
 //     marshals it into a JSON buffer, and to the clipboard helper, which hands
-//     it to the OS clipboard. Neither copy is wiped by this command.
+//     it to the OS clipboard. The vault copy is not wiped; the clipboard copy
+//     is cleared by clipboardClearer after a short delay or on interrupt.
 //
 // Process memory, core dumps and swap can therefore still expose the secret.
 func addPromptedPassword(pwdObj model.PwdFile, pwdName string, pwdBytes []byte, copyToClipboard bool) error {
@@ -173,6 +174,9 @@ func addPromptedPassword(pwdObj model.PwdFile, pwdName string, pwdBytes []byte, 
 	if copyToClipboard {
 		if err := copyPasswordToClipboard(pwdValue); err != nil {
 			return fmt.Errorf("password %q saved, but %w", pwdName, err)
+		}
+		if err := clipboardClearer(pwdValue); err != nil {
+			return fmt.Errorf("password %q saved and copied, but %w", pwdName, err)
 		}
 	}
 	return nil
