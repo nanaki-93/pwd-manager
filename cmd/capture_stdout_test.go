@@ -1,8 +1,11 @@
 package cmd
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"runtime"
 	"strings"
 	"testing"
@@ -30,6 +33,30 @@ func TestCaptureRemoveStdoutLargeOutputDoesNotBlock(t *testing.T) {
 	}
 	if os.Stdout != original {
 		t.Fatal("captureRemoveStdout did not restore stdout")
+	}
+}
+
+// Keep the exact regression-test entry point while sharing the existing
+// large-output assertions rather than duplicating them.
+func TestCaptureRemoveStdoutLargeOutput(t *testing.T) {
+	TestCaptureRemoveStdoutLargeOutputDoesNotBlock(t)
+}
+
+func TestCaptureRemoveStdoutFatalClosesDescriptors(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestCaptureRemoveStdoutFatalChild$", "-test.count=1")
+	cmd.Env = append(os.Environ(), "PWD_MANAGER_CAPTURE_FATAL_CHILD=1")
+	out, err := cmd.CombinedOutput()
+	if ctx.Err() != nil {
+		t.Fatalf("fatal capture child timed out: %v\n%s", ctx.Err(), out)
+	}
+	var exitErr *exec.ExitError
+	if !errors.As(err, &exitErr) || exitErr.ExitCode() != 1 {
+		t.Fatalf("expected intentional test failure, got %v\n%s", err, out)
+	}
+	if !strings.Contains(string(out), "capture fatal cleanup verified") {
+		t.Fatalf("fatal capture did not close both descriptors and restore stdout:\n%s", out)
 	}
 }
 
