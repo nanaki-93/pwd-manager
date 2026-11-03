@@ -7,6 +7,9 @@ import (
 	"os"
 	"strings"
 	"testing"
+
+	"github.com/spf13/cobra"
+	"github.com/spf13/pflag"
 )
 
 func captureStdout(t *testing.T, fn func()) string {
@@ -61,21 +64,38 @@ func TestGetAndAddFlagsRegistered(t *testing.T) {
 	}
 }
 
-func TestGetAndAddCopyFlagParsing(t *testing.T) {
-	defer func() {
-		getCopyFlag = false
-		addCopyFlag = false
-		nameFlag = ""
-	}()
+// parseFlagsIsolated parses args against copies of the command's flag
+// definitions in a fresh flag set, so the shared command's flag set keeps its
+// own parse state and Changed markers. The copies share the bound Values, so
+// the package variables still receive the parsed values; those are restored
+// to their pre-test values when the test ends.
+func parseFlagsIsolated(t *testing.T, cmd *cobra.Command, args []string) error {
+	t.Helper()
+	fs := pflag.NewFlagSet(cmd.Name()+"-isolated", pflag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	cmd.Flags().VisitAll(func(f *pflag.Flag) {
+		clone := *f
+		clone.Changed = false
+		fs.AddFlag(&clone)
+		old := f.Value.String()
+		t.Cleanup(func() {
+			if err := f.Value.Set(old); err != nil {
+				t.Errorf("restore flag %q of %s: %v", f.Name, cmd.Name(), err)
+			}
+		})
+	})
+	return fs.Parse(args)
+}
 
-	if err := getCmd.Flags().Parse([]string{"-n", "github", "-c"}); err != nil {
+func TestGetAndAddCopyFlagParsing(t *testing.T) {
+	if err := parseFlagsIsolated(t, getCmd, []string{"-n", "github", "-c"}); err != nil {
 		t.Fatalf("unexpected parse error on getCmd -c: %v", err)
 	}
 	if !getCopyFlag || nameFlag != "github" {
 		t.Fatalf("expected getCopyFlag=true and nameFlag='github', got %v and %q", getCopyFlag, nameFlag)
 	}
 
-	if err := addCmd.Flags().Parse([]string{"--copy"}); err != nil {
+	if err := parseFlagsIsolated(t, addCmd, []string{"--copy"}); err != nil {
 		t.Fatalf("unexpected parse error on addCmd --copy: %v", err)
 	}
 	if !addCopyFlag {
