@@ -706,3 +706,46 @@ func TestExecAddCmdZeroesPromptedPasswordBuffer(t *testing.T) {
 		t.Fatalf("expected saved password in vault, got %v", loaded.SavedPasswords)
 	}
 }
+
+func TestExecAddCmdSurfacesClipboardFailure(t *testing.T) {
+	seedExecAddVault(t, "valid-master-pass", nil)
+
+	origClip := clipboardWriteAll
+	origCopy := addCopyFlag
+	t.Cleanup(func() {
+		clipboardWriteAll = origClip
+		addCopyFlag = origCopy
+	})
+	clipboardWriteAll = func(string) error {
+		return errors.New("no clipboard available")
+	}
+	addCopyFlag = true
+
+	stubPasswordSequence(t, "valid-master-pass", "clip-fail-secret")
+	exitCount := captureExit(t)
+
+	out := captureStdout(t, func() {
+		feedStdinInput(t, "github\n", func() {
+			execAddCmd(addCmd, nil)
+		})
+	})
+
+	if *exitCount == 0 {
+		t.Fatal("expected ManageErrorAndExit to be called on clipboard failure")
+	}
+	want := `password "github" saved, but failed to copy password to clipboard: no clipboard available`
+	if !strings.Contains(out, want) {
+		t.Fatalf("expected %q in output, got %q", want, out)
+	}
+	if strings.Contains(out, "clip-fail-secret") {
+		t.Fatalf("expected secret not to leak to stdout, got %q", out)
+	}
+	utils.SetMasterKey([]byte("valid-master-pass"))
+	loaded, err := utils.GetPwdObj()
+	if err != nil {
+		t.Fatalf("failed to reload vault: %v", err)
+	}
+	if loaded.SavedPasswords["github"] != "clip-fail-secret" {
+		t.Fatalf("expected password still saved, got %v", loaded.SavedPasswords)
+	}
+}

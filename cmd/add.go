@@ -26,7 +26,8 @@ var addCmd = &cobra.Command{
 
 func init() {
 	rootCmd.AddCommand(addCmd)
-	addCmd.Flags().BoolVarP(&addCopyFlag, "copy", "c", false, "Copy the password to the clipboard")
+	addCmd.Flags().BoolVarP(&addCopyFlag, "copy", "c", false,
+		"Copy the password to the clipboard (it is not cleared automatically and is readable by other local processes and clipboard history tools)")
 }
 
 func readPwdName(r io.Reader) (string, error) {
@@ -113,6 +114,9 @@ func execAddCmd(cmd *cobra.Command, args []string) {
 		return
 	}
 	if addCopyFlag {
-		_ = copyPasswordToClipboard(pwdValue)
+		if err := copyPasswordToClipboard(pwdValue); err != nil {
+			utils.ManageErrorAndExit(fmt.Errorf("password %q saved, but %w", pwdName, err))
+			return
+		}
 	}
 }
