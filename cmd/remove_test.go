@@ -1,39 +1,17 @@
 package cmd
 
 import (
-	"bytes"
 	"errors"
-	"io"
-	"os"
 	"strings"
 	"testing"
 )
 
+// captureRemoveStdout reuses captureStdout, which drains the pipe in a
+// goroutine started before fn runs, closes both pipe ends on every exit path
+// (including t.Fatal / runtime.Goexit) and restores os.Stdout.
 func captureRemoveStdout(t *testing.T, fn func()) string {
 	t.Helper()
-	origStdout := os.Stdout
-	r, w, err := os.Pipe()
-	if err != nil {
-		t.Fatalf("failed to create stdout pipe: %v", err)
-	}
-	os.Stdout = w
-	defer func() {
-		os.Stdout = origStdout
-	}()
-
-	fn()
-
-	if err := w.Close(); err != nil {
-		t.Fatalf("failed to close stdout writer: %v", err)
-	}
-	var buf bytes.Buffer
-	if _, err := io.Copy(&buf, r); err != nil {
-		t.Fatalf("failed to read stdout pipe: %v", err)
-	}
-	if err := r.Close(); err != nil {
-		t.Fatalf("failed to close stdout reader: %v", err)
-	}
-	return buf.String()
+	return captureStdout(t, fn)
 }
 
 func runRemovePasswordWithCapture(t *testing.T, name string, saved map[string]string, saveErr error) (string, bool, error) {
