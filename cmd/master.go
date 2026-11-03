@@ -16,6 +16,7 @@ import (
 	"golang.org/x/crypto/pbkdf2"
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
 )
 
@@ -37,6 +38,24 @@ const (
 )
 
 var randRead = io.ReadFull
+
+// userHomeDir resolves the home directory holding the salt and legacy key
+// files; a variable so tests can make it fail.
+var userHomeDir = os.UserHomeDir
+
+// homeFilePath returns the absolute path of name in the user's home directory.
+// Key files are always addressed this way so a failed home lookup can never
+// fall back to the process working directory.
+func homeFilePath(name string) (string, error) {
+	home, err := userHomeDir()
+	if err != nil {
+		return "", fmt.Errorf("resolve home dir: %w", err)
+	}
+	if !filepath.IsAbs(home) {
+		return "", fmt.Errorf("resolve home dir: %q is not an absolute path", home)
+	}
+	return filepath.Join(home, name), nil
+}
 
 // masterCmd represents the master command
 var masterCmd = &cobra.Command{
@@ -228,7 +247,9 @@ func prepareKey(pwd []byte) (*pendingKey, error) {
 	if err := validateMasterPassword(pwd); err != nil {
 		return nil, err
 	}
-	utils.GoToHomeDir()
+	if _, err := homeFilePath(keyDerivationSaltFile); err != nil {
+		return nil, err
+	}
 	fmt.Println("Generating a key to encrypt your file:")
 	salt := make([]byte, keyDerivationSaltLen)
 	iterations, loaded, err := loadOrCreateKeySalt(salt)
@@ -260,19 +281,16 @@ func loadOrCreateKeySalt(salt []byte) (int, bool, error) {
 // readKeySalt loads the salt file into salt and returns its recorded PBKDF2
 // iterations. Legacy files holding only the raw salt imply legacyKeyDerivationIterations.
 func readKeySalt(salt []byte) (int, bool, error) {
-	info, err := os.Lstat(keyDerivationSaltFile)
+	saltPath, err := homeFilePath(keyDerivationSaltFile)
+	if err != nil {
+		return 0, false, err
+	}
+	data, err := readRegularFileNoFollow(saltPath, keyDerivationSaltFile)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return 0, false, nil
 		}
-		return 0, false, fmt.Errorf("stat salt file: %w", err)
-	}
-	if !info.Mode().IsRegular() {
-		return 0, false, &os.PathError{Op: "open", Path: keyDerivationSaltFile, Err: errors.New("not a regular file")}
-	}
-	data, err := os.ReadFile(keyDerivationSaltFile)
-	if err != nil {
-		return 0, false, fmt.Errorf("read salt file: %w", err)
+		return 0, false, err
 	}
 	defer clear(data)
 	iterations, raw, err := parseKeySalt(data, len(salt))
@@ -281,6 +299,45 @@ func readKeySalt(salt []byte) (int, bool, error) {
 	}
 	copy(salt, raw)
 	return iterations, true, nil
+}
+
+// openKeyFile opens a key file for reading; a variable so tests can swap the
+// path between the symlink check and the open.
+var openKeyFile = os.Open
+
+// readRegularFileNoFollow reads path only when it is a regular file that is not
+// a symlink. The opened handle is compared with the checked path, so a symlink
+// or other file swapped in after the check is refused instead of read.
+func readRegularFileNoFollow(path, name string) ([]byte, error) {
+	notRegular := &os.PathError{Op: "open", Path: name, Err: errors.New("not a regular file")}
+	info, err := os.Lstat(path)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, err
+		}
+		return nil, fmt.Errorf("stat salt file: %w", err)
+	}
+	if !info.Mode().IsRegular() {
+		return nil, notRegular
+	}
+	f, err := openKeyFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("open salt file: %w", err)
+	}
+	defer f.Close()
+	opened, err := f.Stat()
+	if err != nil {
+		return nil, fmt.Errorf("stat opened salt file: %w", err)
+	}
+	if !opened.Mode().IsRegular() || !os.SameFile(info, opened) {
+		return nil, notRegular
+	}
+	data, err := io.ReadAll(f)
+	if err != nil {
+		clear(data)
+		return nil, fmt.Errorf("read salt file: %w", err)
+	}
+	return data, nil
 }
 
 func parseKeySalt(data []byte, saltLen int) (int, []byte, error) {
@@ -301,7 +358,11 @@ func writeKeySalt(salt []byte) error {
 	if len(salt) == 0 {
 		return errors.New("key derivation salt cannot be empty")
 	}
-	info, err := os.Lstat(keyDerivationSaltFile)
+	saltPath, err := homeFilePath(keyDerivationSaltFile)
+	if err != nil {
+		return err
+	}
+	info, err := os.Lstat(saltPath)
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
 		return fmt.Errorf("stat salt file: %w", err)
 	}
@@ -313,7 +374,7 @@ func writeKeySalt(salt []byte) error {
 	data = binary.BigEndian.AppendUint32(data, uint32(keyDerivationIterations))
 	data = append(data, salt...)
 	defer clear(data)
-	if err := writeFileAtomic(keyDerivationSaltFile, data); err != nil {
+	if err := writeFileAtomic(saltPath, data); err != nil {
 		return fmt.Errorf("write salt file: %w", err)
 	}
 	return nil
@@ -322,7 +383,7 @@ func writeKeySalt(salt []byte) error {
 // writeFileAtomic writes data to a synced temporary file next to path and
 // renames it into place, so an interrupted write never truncates path.
 func writeFileAtomic(path string, data []byte) error {
-	tmp, err := os.CreateTemp(".", path+".tmp-*")
+	tmp, err := os.CreateTemp(filepath.Dir(path), filepath.Base(path)+".tmp-*")
 	if err != nil {
 		return fmt.Errorf("create temp file: %w", err)
 	}
@@ -358,7 +419,11 @@ func writeAndSync(f *os.File, data []byte) error {
 // checkLegacyKeyFile fails when the legacy key path exists but is not a regular
 // file, so rotation stops before anything is written.
 func checkLegacyKeyFile() error {
-	info, err := os.Lstat(utils.PwdFileKey)
+	keyPath, err := homeFilePath(utils.PwdFileKey)
+	if err != nil {
+		return err
+	}
+	info, err := os.Lstat(keyPath)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return nil
@@ -375,7 +440,11 @@ func removeLegacyKeyFile() error {
 	if err := checkLegacyKeyFile(); err != nil {
 		return err
 	}
-	if err := os.Remove(utils.PwdFileKey); err != nil && !errors.Is(err, os.ErrNotExist) {
+	keyPath, err := homeFilePath(utils.PwdFileKey)
+	if err != nil {
+		return err
+	}
+	if err := os.Remove(keyPath); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return fmt.Errorf("remove key file: %w", err)
 	}
 	return nil
