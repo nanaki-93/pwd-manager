@@ -444,7 +444,42 @@ func TestStorePasswordReportsSaveFailure(t *testing.T) {
 	}
 }
 
-func TestStorePasswordPreservesExistingEntriesAndEmptyValue(t *testing.T) {
+func TestStorePasswordRejectsEmptyValueWithoutOverwriting(t *testing.T) {
+	orig := saveVault
+	t.Cleanup(func() { saveVault = orig })
+
+	saveCalled := false
+	saveVault = func(model.PwdFile, error) error {
+		saveCalled = true
+		return nil
+	}
+
+	initial := model.PwdFile{
+		MasterPassword: "hashed-master",
+		SavedPasswords: map[string]string{
+			"email":  "keep-me",
+			"github": "old-secret",
+		},
+	}
+	err := storePassword(initial, "github", "")
+	if !errors.Is(err, errEmptyPassword) {
+		t.Fatalf("expected errEmptyPassword, got %v", err)
+	}
+	if !strings.Contains(err.Error(), `save password "github"`) {
+		t.Fatalf("expected operation context in error, got %q", err.Error())
+	}
+	if saveCalled {
+		t.Fatal("expected vault not to be saved for an empty password")
+	}
+	if initial.SavedPasswords["github"] != "old-secret" {
+		t.Fatalf("expected existing entry untouched, got %q", initial.SavedPasswords["github"])
+	}
+	if initial.SavedPasswords["email"] != "keep-me" {
+		t.Fatalf("expected unrelated entry untouched, got %q", initial.SavedPasswords["email"])
+	}
+}
+
+func TestStorePasswordPreservesExistingEntries(t *testing.T) {
 	orig := saveVault
 	t.Cleanup(func() { saveVault = orig })
 
@@ -464,7 +499,7 @@ func TestStorePasswordPreservesExistingEntriesAndEmptyValue(t *testing.T) {
 			"github": "old-secret",
 		},
 	}
-	if err := storePassword(initial, "github", ""); err != nil {
+	if err := storePassword(initial, "github", "new-secret"); err != nil {
 		t.Fatalf("expected nil error, got %v", err)
 	}
 	if saved.MasterPassword != "hashed-master" {
@@ -473,8 +508,40 @@ func TestStorePasswordPreservesExistingEntriesAndEmptyValue(t *testing.T) {
 	if saved.SavedPasswords["email"] != "keep-me" {
 		t.Fatalf("expected unrelated entry preserved, got %q", saved.SavedPasswords["email"])
 	}
-	if val, ok := saved.SavedPasswords["github"]; !ok || val != "" {
-		t.Fatalf("expected overwritten empty value for github, ok=%v val=%q", ok, val)
+	if saved.SavedPasswords["github"] != "new-secret" {
+		t.Fatalf("expected overwritten value for github, got %q", saved.SavedPasswords["github"])
+	}
+}
+
+func TestExecAddCmdRejectsEmptyPasswordAfterOverwriteConfirm(t *testing.T) {
+	seedExecAddVault(t, "valid-master-pass", map[string]string{"github": "old-secret"})
+
+	origCopy := addCopyFlag
+	t.Cleanup(func() { addCopyFlag = origCopy })
+	addCopyFlag = false
+
+	stubPasswordSequence(t, "valid-master-pass", "")
+	exitCount := captureExit(t)
+
+	out := captureStdout(t, func() {
+		feedStdinInput(t, "github\ny\n", func() {
+			execAddCmd(addCmd, nil)
+		})
+	})
+
+	if *exitCount == 0 {
+		t.Fatal("expected ManageErrorAndExit to be called for an empty password")
+	}
+	if !strings.Contains(out, "password value cannot be empty") {
+		t.Fatalf("expected empty password error in output, got %q", out)
+	}
+	utils.SetMasterKey([]byte("valid-master-pass"))
+	loaded, err := utils.GetPwdObj()
+	if err != nil {
+		t.Fatalf("failed to reload vault: %v", err)
+	}
+	if loaded.SavedPasswords["github"] != "old-secret" {
+		t.Fatalf("expected existing password kept, got %q", loaded.SavedPasswords["github"])
 	}
 }
 

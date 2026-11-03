@@ -61,9 +61,17 @@ func canSavePassword(savedPasswords map[string]string, pwdName string, r io.Read
 // saveVault persists the vault; a package variable so tests can inject failures.
 var saveVault = utils.SaveFileErr
 
+// errEmptyPassword reports that the prompted password value was empty.
+var errEmptyPassword = errors.New("password value cannot be empty")
+
 // storePassword records pwdValue under pwdName and persists the vault,
 // returning any save failure with context instead of relying on a stale error.
+// An empty pwdValue is rejected before the vault is touched so it can never
+// overwrite an existing entry.
 func storePassword(pwdObj model.PwdFile, pwdName, pwdValue string) error {
+	if pwdValue == "" {
+		return fmt.Errorf("save password %q: %w", pwdName, errEmptyPassword)
+	}
 	if pwdObj.SavedPasswords == nil {
 		pwdObj.SavedPasswords = make(map[string]string)
 	}
