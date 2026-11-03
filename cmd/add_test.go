@@ -444,7 +444,42 @@ func TestStorePasswordReportsSaveFailure(t *testing.T) {
 	}
 }
 
-func TestStorePasswordPreservesExistingEntriesAndEmptyValue(t *testing.T) {
+func TestStorePasswordRejectsEmptyValueWithoutOverwriting(t *testing.T) {
+	orig := saveVault
+	t.Cleanup(func() { saveVault = orig })
+
+	saveCalled := false
+	saveVault = func(model.PwdFile, error) error {
+		saveCalled = true
+		return nil
+	}
+
+	initial := model.PwdFile{
+		MasterPassword: "hashed-master",
+		SavedPasswords: map[string]string{
+			"email":  "keep-me",
+			"github": "old-secret",
+		},
+	}
+	err := storePassword(initial, "github", "")
+	if !errors.Is(err, errEmptyPassword) {
+		t.Fatalf("expected errEmptyPassword, got %v", err)
+	}
+	if !strings.Contains(err.Error(), `save password "github"`) {
+		t.Fatalf("expected operation context in error, got %q", err.Error())
+	}
+	if saveCalled {
+		t.Fatal("expected vault not to be saved for an empty password")
+	}
+	if initial.SavedPasswords["github"] != "old-secret" {
+		t.Fatalf("expected existing entry untouched, got %q", initial.SavedPasswords["github"])
+	}
+	if initial.SavedPasswords["email"] != "keep-me" {
+		t.Fatalf("expected unrelated entry untouched, got %q", initial.SavedPasswords["email"])
+	}
+}
+
+func TestStorePasswordPreservesExistingEntries(t *testing.T) {
 	orig := saveVault
 	t.Cleanup(func() { saveVault = orig })
 
@@ -464,7 +499,7 @@ func TestStorePasswordPreservesExistingEntriesAndEmptyValue(t *testing.T) {
 			"github": "old-secret",
 		},
 	}
-	if err := storePassword(initial, "github", ""); err != nil {
+	if err := storePassword(initial, "github", "new-secret"); err != nil {
 		t.Fatalf("expected nil error, got %v", err)
 	}
 	if saved.MasterPassword != "hashed-master" {
@@ -473,8 +508,40 @@ func TestStorePasswordPreservesExistingEntriesAndEmptyValue(t *testing.T) {
 	if saved.SavedPasswords["email"] != "keep-me" {
 		t.Fatalf("expected unrelated entry preserved, got %q", saved.SavedPasswords["email"])
 	}
-	if val, ok := saved.SavedPasswords["github"]; !ok || val != "" {
-		t.Fatalf("expected overwritten empty value for github, ok=%v val=%q", ok, val)
+	if saved.SavedPasswords["github"] != "new-secret" {
+		t.Fatalf("expected overwritten value for github, got %q", saved.SavedPasswords["github"])
+	}
+}
+
+func TestExecAddCmdRejectsEmptyPasswordAfterOverwriteConfirm(t *testing.T) {
+	seedExecAddVault(t, "valid-master-pass", map[string]string{"github": "old-secret"})
+
+	origCopy := addCopyFlag
+	t.Cleanup(func() { addCopyFlag = origCopy })
+	addCopyFlag = false
+
+	stubPasswordSequence(t, "valid-master-pass", "")
+	exitCount := captureExit(t)
+
+	out := captureStdout(t, func() {
+		feedStdinInput(t, "github\ny\n", func() {
+			execAddCmd(addCmd, nil)
+		})
+	})
+
+	if *exitCount == 0 {
+		t.Fatal("expected ManageErrorAndExit to be called for an empty password")
+	}
+	if !strings.Contains(out, "password value cannot be empty") {
+		t.Fatalf("expected empty password error in output, got %q", out)
+	}
+	utils.SetMasterKey([]byte("valid-master-pass"))
+	loaded, err := utils.GetPwdObj()
+	if err != nil {
+		t.Fatalf("failed to reload vault: %v", err)
+	}
+	if loaded.SavedPasswords["github"] != "old-secret" {
+		t.Fatalf("expected existing password kept, got %q", loaded.SavedPasswords["github"])
 	}
 }
 
@@ -582,5 +649,103 @@ func TestExecAddCmdPersistsAndCopiesOnSuccess(t *testing.T) {
 	}
 	if loaded.SavedPasswords["github"] != "super-secret-123" {
 		t.Fatalf("expected saved password in vault, got %v", loaded.SavedPasswords)
+	}
+}
+
+func TestExecAddCmdZeroesPromptedPasswordBuffer(t *testing.T) {
+	seedExecAddVault(t, "valid-master-pass", nil)
+
+	origClip := clipboardWriteAll
+	origCopy := addCopyFlag
+	t.Cleanup(func() {
+		clipboardWriteAll = origClip
+		addCopyFlag = origCopy
+	})
+	var copied string
+	clipboardWriteAll = func(text string) error {
+		copied = text
+		return nil
+	}
+	addCopyFlag = true
+
+	secretBuf := []byte("zero-me-secret")
+	calls := 0
+	restore := utils.SetReadPasswordStdin(func() ([]byte, error) {
+		calls++
+		if calls == 1 {
+			return []byte("valid-master-pass"), nil
+		}
+		return secretBuf, nil
+	})
+	t.Cleanup(restore)
+	exitCount := captureExit(t)
+
+	_ = captureStdout(t, func() {
+		feedStdinInput(t, "github\n", func() {
+			execAddCmd(addCmd, nil)
+		})
+	})
+
+	if *exitCount != 0 {
+		t.Fatalf("expected no error exit, got %d", *exitCount)
+	}
+	for i, b := range secretBuf {
+		if b != 0 {
+			t.Fatalf("expected prompted password buffer zeroed, byte %d is %q (buffer %q)", i, b, secretBuf)
+		}
+	}
+	if copied != "zero-me-secret" {
+		t.Fatalf("expected password copied to clipboard, got %q", copied)
+	}
+	utils.SetMasterKey([]byte("valid-master-pass"))
+	loaded, err := utils.GetPwdObj()
+	if err != nil {
+		t.Fatalf("failed to reload vault: %v", err)
+	}
+	if loaded.SavedPasswords["github"] != "zero-me-secret" {
+		t.Fatalf("expected saved password in vault, got %v", loaded.SavedPasswords)
+	}
+}
+
+func TestExecAddCmdSurfacesClipboardFailure(t *testing.T) {
+	seedExecAddVault(t, "valid-master-pass", nil)
+
+	origClip := clipboardWriteAll
+	origCopy := addCopyFlag
+	t.Cleanup(func() {
+		clipboardWriteAll = origClip
+		addCopyFlag = origCopy
+	})
+	clipboardWriteAll = func(string) error {
+		return errors.New("no clipboard available")
+	}
+	addCopyFlag = true
+
+	stubPasswordSequence(t, "valid-master-pass", "clip-fail-secret")
+	exitCount := captureExit(t)
+
+	out := captureStdout(t, func() {
+		feedStdinInput(t, "github\n", func() {
+			execAddCmd(addCmd, nil)
+		})
+	})
+
+	if *exitCount == 0 {
+		t.Fatal("expected ManageErrorAndExit to be called on clipboard failure")
+	}
+	want := `password "github" saved, but failed to copy password to clipboard: no clipboard available`
+	if !strings.Contains(out, want) {
+		t.Fatalf("expected %q in output, got %q", want, out)
+	}
+	if strings.Contains(out, "clip-fail-secret") {
+		t.Fatalf("expected secret not to leak to stdout, got %q", out)
+	}
+	utils.SetMasterKey([]byte("valid-master-pass"))
+	loaded, err := utils.GetPwdObj()
+	if err != nil {
+		t.Fatalf("failed to reload vault: %v", err)
+	}
+	if loaded.SavedPasswords["github"] != "clip-fail-secret" {
+		t.Fatalf("expected password still saved, got %v", loaded.SavedPasswords)
 	}
 }

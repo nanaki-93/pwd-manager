@@ -26,7 +26,8 @@ var addCmd = &cobra.Command{
 
 func init() {
 	rootCmd.AddCommand(addCmd)
-	addCmd.Flags().BoolVarP(&addCopyFlag, "copy", "c", false, "Copy the password to the clipboard")
+	addCmd.Flags().BoolVarP(&addCopyFlag, "copy", "c", false,
+		"Copy the password to the clipboard (it is not cleared automatically and is readable by other local processes and clipboard history tools)")
 }
 
 func readPwdName(r io.Reader) (string, error) {
@@ -61,9 +62,17 @@ func canSavePassword(savedPasswords map[string]string, pwdName string, r io.Read
 // saveVault persists the vault; a package variable so tests can inject failures.
 var saveVault = utils.SaveFileErr
 
+// errEmptyPassword reports that the prompted password value was empty.
+var errEmptyPassword = errors.New("password value cannot be empty")
+
 // storePassword records pwdValue under pwdName and persists the vault,
 // returning any save failure with context instead of relying on a stale error.
+// An empty pwdValue is rejected before the vault is touched so it can never
+// overwrite an existing entry.
 func storePassword(pwdObj model.PwdFile, pwdName, pwdValue string) error {
+	if pwdValue == "" {
+		return fmt.Errorf("save password %q: %w", pwdName, errEmptyPassword)
+	}
 	if pwdObj.SavedPasswords == nil {
 		pwdObj.SavedPasswords = make(map[string]string)
 	}
@@ -95,12 +104,19 @@ func execAddCmd(cmd *cobra.Command, args []string) {
 		return
 	}
 
-	pwdValue := utils.PromptPassword("Insert the password for " + pwdName + ":")
-	if err := storePassword(pwdObj, pwdName, string(pwdValue)); err != nil {
+	// The vault stores values as strings, so convert exactly once and wipe the
+	// prompted bytes immediately so no extra copy of the secret lingers.
+	pwdBytes := utils.PromptPassword("Insert the password for " + pwdName + ":")
+	pwdValue := string(pwdBytes)
+	clear(pwdBytes)
+	if err := storePassword(pwdObj, pwdName, pwdValue); err != nil {
 		utils.ManageErrorAndExit(err)
 		return
 	}
 	if addCopyFlag {
-		_ = copyPasswordToClipboard(string(pwdValue))
+		if err := copyPasswordToClipboard(pwdValue); err != nil {
+			utils.ManageErrorAndExit(fmt.Errorf("password %q saved, but %w", pwdName, err))
+			return
+		}
 	}
 }
