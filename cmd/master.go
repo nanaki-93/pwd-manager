@@ -78,6 +78,10 @@ func execMasterCmd(cmd *cobra.Command, args []string) {
 		fmt.Println("You don't have a master password yet.")
 		isToInit = true
 	}
+	if err := requireMasterHash(currPwdContent, !isToInit); err != nil {
+		utils.ManageErrorAndExit(err)
+		return
+	}
 	if !isToInit {
 		fmt.Println("Do you want to update your master password? (y/n)")
 		answer, err := readConfirmation(os.Stdin)
@@ -93,6 +97,23 @@ func execMasterCmd(cmd *cobra.Command, args []string) {
 		savePassword(currPwdContent)
 	}
 
+}
+
+// errMissingMasterHash reports an existing store without a master password
+// hash; rotating its key would skip verification of the current password.
+var errMissingMasterHash = errors.New("password store exists but has no master password hash; refusing to change the master password")
+
+// requireMasterHash fails when content comes from an existing store, or holds
+// saved passwords, but has no master hash to verify the current password against.
+// A non-empty but malformed hash never verifies, so it is refused by savePassword.
+func requireMasterHash(content model.PwdFile, storeExists bool) error {
+	if content.MasterPassword != "" {
+		return nil
+	}
+	if storeExists || len(content.SavedPasswords) > 0 {
+		return errMissingMasterHash
+	}
+	return nil
 }
 
 // readConfirmation reads one answer line from r a byte at a time, so input meant
@@ -125,6 +146,10 @@ func savePassword(currPwdContent model.PwdFile) {
 		clear(currPassword)
 		clear(newPassword)
 	}()
+	if err := requireMasterHash(currPwdContent, false); err != nil {
+		utils.ManageErrorAndExit(err)
+		return
+	}
 	if currPwdContent.MasterPassword != "" {
 		currPassword = utils.PromptPassword("Enter your current password:")
 		matched := utils.VerifyMasterPassword(currPwdContent.MasterPassword, currPassword)
@@ -166,21 +191,31 @@ var saveStore = utils.SaveFileErr
 // the legacy key file is removed only afterwards, and on a failed save the new
 // key is dropped from memory so it cannot be used for later saves.
 func rotateMasterKey(password []byte, content model.PwdFile) error {
-	pending, err := prepareKey(password)
+	pending, err := prepareKey(password, true)
 	if err != nil {
 		return err
 	}
 	defer pending.wipe()
+	return pending.install(&content)
+}
+
+// install writes the salt and puts the key into use. With content it re-saves
+// the store under the key and only then removes the legacy key file; without
+// content the store is not re-encrypted, so the legacy key file is kept.
+func (p *pendingKey) install(content *model.PwdFile) error {
 	if err := checkLegacyKeyFile(); err != nil {
 		return err
 	}
 	// The salt is written first so a saved store never depends on an unsaved
 	// salt; an existing salt keeps its bytes and only gains the parameter header.
-	if err := pending.persistSalt(); err != nil {
+	if err := p.persistSalt(); err != nil {
 		return err
 	}
-	utils.SetMasterKey(pending.key)
-	if err := saveStore(content, nil); err != nil {
+	utils.SetMasterKey(p.key)
+	if content == nil {
+		return nil
+	}
+	if err := saveStore(*content, nil); err != nil {
 		utils.SetMasterKey(nil)
 		return fmt.Errorf("save store with new master key: %w", err)
 	}
@@ -203,7 +238,9 @@ func generateKey(password ...[]byte) error {
 	if len(password) > 0 {
 		pwd = password[0]
 	}
-	pending, err := prepareKey(pwd)
+	// The key must match data already encrypted under the salt file, so it is
+	// derived with the recorded iterations and the salt header is kept.
+	pending, err := prepareKey(pwd, false)
 	if err != nil {
 		return err
 	}
@@ -211,14 +248,20 @@ func generateKey(password ...[]byte) error {
 	if err := checkLegacyKeyFile(); err != nil {
 		return err
 	}
-	if err := pending.persistSalt(); err != nil {
-		return err
+	// A store that may depend on the legacy key file is migrated to the new key
+	// before that file is removed; one that cannot be read now keeps the file.
+	content, err := utils.GetPwdObj()
+	switch {
+	case err == nil:
+		return pending.install(&content)
+	case errors.Is(err, os.ErrNotExist):
+		if err := pending.install(nil); err != nil {
+			return err
+		}
+		return removeLegacyKeyFile()
+	default:
+		return pending.install(nil)
 	}
-	if err := removeLegacyKeyFile(); err != nil {
-		return err
-	}
-	utils.SetMasterKey(pending.key)
-	return nil
 }
 
 // pendingKey is a derived key that has not been put into use yet.
@@ -243,8 +286,11 @@ func (p *pendingKey) persistSalt() error {
 }
 
 // prepareKey loads or creates the salt and derives the key for pwd without
-// changing any file or the in-memory master key.
-func prepareKey(pwd []byte) (*pendingKey, error) {
+// changing any file or the in-memory master key. With upgrade the key uses
+// keyDerivationIterations and an outdated salt header is marked for rewrite, so
+// it is only for callers that re-encrypt the store; without it the key
+// reproduces the one recorded by an existing salt file, which is left as is.
+func prepareKey(pwd []byte, upgrade bool) (*pendingKey, error) {
 	if err := validateMasterPassword(pwd); err != nil {
 		return nil, err
 	}
@@ -258,12 +304,16 @@ func prepareKey(pwd []byte) (*pendingKey, error) {
 		clear(salt)
 		return nil, err
 	}
-	derivedKey, err := deriveKey(pwd, salt)
+	writeSalt := !loaded
+	if upgrade && iterations != keyDerivationIterations {
+		iterations, writeSalt = keyDerivationIterations, true
+	}
+	derivedKey, err := deriveKey(pwd, salt, iterations)
 	if err != nil {
 		clear(salt)
 		return nil, err
 	}
-	return &pendingKey{salt: salt, key: derivedKey, writeSalt: !loaded || iterations != keyDerivationIterations}, nil
+	return &pendingKey{salt: salt, key: derivedKey, writeSalt: writeSalt}, nil
 }
 
 // loadOrCreateKeySalt fills salt from the salt file, or with random bytes when
@@ -451,14 +501,19 @@ func removeLegacyKeyFile() error {
 	return nil
 }
 
-func deriveKey(password, salt []byte) ([]byte, error) {
+// deriveKey derives the encryption key for password and salt with PBKDF2 at
+// the given iteration count.
+func deriveKey(password, salt []byte, iterations int) ([]byte, error) {
 	if err := validateMasterPassword(password); err != nil {
 		return nil, err
 	}
 	if len(salt) == 0 {
 		return nil, errors.New("key derivation salt cannot be empty")
 	}
-	return pbkdf2.Key(password, salt, keyDerivationIterations, encryptionKeyLen, sha256.New), nil
+	if iterations < legacyKeyDerivationIterations || iterations > maxKeyDerivationIterations {
+		return nil, fmt.Errorf("unsupported PBKDF2 iteration count %d", iterations)
+	}
+	return pbkdf2.Key(password, salt, iterations, encryptionKeyLen, sha256.New), nil
 }
 
 func init() {

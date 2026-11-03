@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/nanaki-93/pwd-manager/internal/model"
+	"github.com/nanaki-93/pwd-manager/internal/utils"
 	"golang.org/x/crypto/pbkdf2"
 )
 
@@ -29,7 +31,7 @@ func readStoredSaltParams(t *testing.T, tmpHome string) (int, []byte) {
 func TestDeriveKeyUsesStrongPBKDF2(t *testing.T) {
 	password := []byte("valid-master-secret")
 	salt := bytes.Repeat([]byte{0x5c}, keyDerivationSaltLen)
-	got, err := deriveKey(password, salt)
+	got, err := deriveKey(password, salt, keyDerivationIterations)
 	if err != nil {
 		t.Fatalf("deriveKey: %v", err)
 	}
@@ -57,18 +59,25 @@ func TestGenerateKeyStoresKDFParametersMeetingMinimum(t *testing.T) {
 	}
 }
 
-func TestGenerateKeyMigratesLegacySaltFile(t *testing.T) {
+func TestRotateMasterKeyMigratesLegacySaltFile(t *testing.T) {
 	tmpHome := withTempHome(t)
+	t.Cleanup(func() { utils.SetMasterKey(nil) })
 	legacySalt := bytes.Repeat([]byte{0x7e}, keyDerivationSaltLen)
 	if err := os.WriteFile(filepath.Join(tmpHome, keyDerivationSaltFile), legacySalt, 0o600); err != nil {
 		t.Fatalf("seed legacy salt file: %v", err)
 	}
-	if err := generateKey([]byte("valid-master-secret")); err != nil {
-		t.Fatalf("generateKey with legacy salt file: %v", err)
+	password := []byte("valid-master-secret")
+	content := model.PwdFile{MasterPassword: "pbkdf2-sha256$x"}
+	if err := rotateMasterKey(password, content); err != nil {
+		t.Fatalf("rotateMasterKey with legacy salt file: %v", err)
 	}
 	iter, salt := readStoredSaltParams(t, tmpHome)
 	if iter != keyDerivationIterations || !bytes.Equal(salt, legacySalt) {
 		t.Fatalf("migrated salt file = (%d, %x), want (%d, %x)", iter, salt, keyDerivationIterations, legacySalt)
+	}
+	utils.SetMasterKey(pbkdf2.Key(password, legacySalt, keyDerivationIterations, encryptionKeyLen, sha256.New))
+	if loaded, err := utils.GetPwdObj(); err != nil || loaded.MasterPassword != content.MasterPassword {
+		t.Fatalf("store not saved under key at %d iterations (err=%v)", keyDerivationIterations, err)
 	}
 }
 

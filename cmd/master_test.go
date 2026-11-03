@@ -214,7 +214,7 @@ func TestGenerateKeyDoesNotPersistRawKeyAndRemovesLegacyKeyFile(t *testing.T) {
 	fixedSalt := bytes.Repeat([]byte{0xab}, 32)
 	capturedSaltBuf := stubFixedRandSalt(t, 0xab, nil)
 
-	expectedKey, err := deriveKey(password, fixedSalt)
+	expectedKey, err := deriveKey(password, fixedSalt, keyDerivationIterations)
 	if err != nil {
 		t.Fatalf("deriveKey failed: %v", err)
 	}
@@ -340,7 +340,7 @@ func TestDeriveKeyAndGenerateKeyValidationBoundaries(t *testing.T) {
 		t.Fatalf("expected generateKey with no arguments to reject empty password")
 	}
 	for _, invalidPwd := range [][]byte{nil, []byte(""), []byte("   "), []byte("short77")} {
-		if _, err := deriveKey(invalidPwd, saltA); err == nil {
+		if _, err := deriveKey(invalidPwd, saltA, keyDerivationIterations); err == nil {
 			t.Fatalf("expected deriveKey to reject weak password %q", invalidPwd)
 		}
 		if err := generateKey(invalidPwd); err == nil {
@@ -350,17 +350,17 @@ func TestDeriveKeyAndGenerateKeyValidationBoundaries(t *testing.T) {
 	if _, statErr := os.Stat(filepath.Join(tmpHome, utils.PwdFileKey)); !errors.Is(statErr, os.ErrNotExist) {
 		t.Fatalf("expected no key file when generateKey rejects invalid password, got %v", statErr)
 	}
-	if _, err := deriveKey([]byte("valid-master-secret"), nil); err == nil || !strings.Contains(err.Error(), "salt cannot be empty") {
+	if _, err := deriveKey([]byte("valid-master-secret"), nil, keyDerivationIterations); err == nil || !strings.Contains(err.Error(), "salt cannot be empty") {
 		t.Fatalf("expected empty salt error from deriveKey, got %v", err)
 	}
 
-	k1, err := deriveKey([]byte("password-alpha"), saltA)
+	k1, err := deriveKey([]byte("password-alpha"), saltA, keyDerivationIterations)
 	if err != nil || len(k1) != encryptionKeyLen {
 		t.Fatalf("expected %d-byte derived key, got len=%d err=%v", encryptionKeyLen, len(k1), err)
 	}
-	k1Repeat, _ := deriveKey([]byte("password-alpha"), saltA)
-	kDiffSalt, _ := deriveKey([]byte("password-alpha"), saltB)
-	kDiffPwd, _ := deriveKey([]byte("password-bravo"), saltA)
+	k1Repeat, _ := deriveKey([]byte("password-alpha"), saltA, keyDerivationIterations)
+	kDiffSalt, _ := deriveKey([]byte("password-alpha"), saltB, keyDerivationIterations)
+	kDiffPwd, _ := deriveKey([]byte("password-bravo"), saltA, keyDerivationIterations)
 	if !bytes.Equal(k1, k1Repeat) || bytes.Equal(k1, kDiffSalt) || bytes.Equal(k1, kDiffPwd) {
 		t.Fatalf("expected deterministic key derivation sensitive to both password and salt")
 	}
