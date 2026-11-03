@@ -25,7 +25,7 @@ func assertGenerateKeyReproducesRecordedKey(t *testing.T, saltData, salt []byte,
 		t.Fatalf("seed salt file: %v", err)
 	}
 	password := []byte("valid-master-secret")
-	utils.SetMasterKey(pbkdf2.Key(password, salt, iterations, encryptionKeyLen, sha256.New))
+	utils.SetMasterKey(pbkdf2Key(password, salt, iterations, encryptionKeyLen, sha256.New))
 	original := model.PwdFile{MasterPassword: "pbkdf2-sha256$x", SavedPasswords: map[string]string{"mail": "c2VjcmV0"}}
 	if err := utils.SaveFileErr(original, nil); err != nil {
 		t.Fatalf("write fixture store: %v", err)
@@ -62,6 +62,7 @@ func TestGenerateKeyUsesRecordedHeaderIterations(t *testing.T) {
 }
 
 func TestDeriveKeyUsesGivenIterations(t *testing.T) {
+	useRealKDF(t)
 	password := []byte("valid-master-secret")
 	salt := bytes.Repeat([]byte{0x19}, keyDerivationSaltLen)
 	got, err := deriveKey(password, salt, legacyKeyDerivationIterations)

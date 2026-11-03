@@ -513,8 +513,12 @@ func deriveKey(password, salt []byte, iterations int) ([]byte, error) {
 	if iterations < legacyKeyDerivationIterations || iterations > maxKeyDerivationIterations {
 		return nil, fmt.Errorf("unsupported PBKDF2 iteration count %d", iterations)
 	}
-	return pbkdf2.Key(password, salt, iterations, encryptionKeyLen, sha256.New), nil
+	return pbkdf2Key(password, salt, iterations, encryptionKeyLen, sha256.New), nil
 }
+
+// pbkdf2Key computes the PBKDF2 derivation of deriveKey; a variable so tests
+// can swap in a cheaper function while recorded parameters stay unchanged.
+var pbkdf2Key = pbkdf2.Key
 
 func init() {
 	rootCmd.AddCommand(masterCmd)

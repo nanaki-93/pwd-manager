@@ -144,7 +144,22 @@ func deriveEncryptionKey(secret, salt []byte, iter int) []byte {
 	domainSalt = append(domainSalt, salt...)
 	domainSalt = append(domainSalt, ':')
 	domainSalt = append(domainSalt, "enc-v2"...)
-	return pbkdf2SHA256(secret, domainSalt, iter, derivedKeySize)
+	return kdf(secret, domainSalt, iter, derivedKeySize)
+}
+
+// kdf computes every PBKDF2-HMAC-SHA256 derivation of this package; a variable
+// so tests can swap in a cheaper function while recorded parameters stay unchanged.
+var kdf = pbkdf2SHA256
+
+// SetKDFForTesting overrides the PBKDF2 function used for master hashes and store
+// keys and returns a restore callback. It is meant only for tests: fn must be
+// deterministic in all its arguments so stores written with it can be read back.
+func SetKDFForTesting(fn func(password, salt []byte, iter, keyLen int) []byte) func() {
+	prev := kdf
+	kdf = fn
+	return func() {
+		kdf = prev
+	}
 }
 
 func validIterations(iter int) bool {
@@ -176,7 +191,7 @@ func HashMasterPassword(password []byte) (string, error) {
 	if _, err := randRead(rand.Reader, salt); err != nil {
 		return "", fmt.Errorf("generate salt: %w", err)
 	}
-	dk := pbkdf2SHA256(password, salt, pbkdf2Iter, derivedKeySize)
+	dk := kdf(password, salt, pbkdf2Iter, derivedKeySize)
 	return fmt.Sprintf("%s%d$%s$%s", hashPrefix, pbkdf2Iter, hex.EncodeToString(salt), hex.EncodeToString(dk)), nil
 }
 
@@ -187,7 +202,7 @@ func VerifyMasterPassword(stored string, candidate []byte) bool {
 	if !ok {
 		return false
 	}
-	actualDK := pbkdf2SHA256(candidate, salt, iter, derivedKeySize)
+	actualDK := kdf(candidate, salt, iter, derivedKeySize)
 	return subtle.ConstantTimeCompare(expectedDK, actualDK) == 1
 }
 

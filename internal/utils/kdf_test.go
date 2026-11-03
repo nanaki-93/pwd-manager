@@ -28,7 +28,7 @@ const (
 func legacyHash(t *testing.T, password []byte) string {
 	t.Helper()
 	salt := bytes.Repeat([]byte{0x42}, saltSize)
-	dk := pbkdf2SHA256(password, salt, testLegacyPBKDF2Iter, derivedKeySize)
+	dk := kdf(password, salt, testLegacyPBKDF2Iter, derivedKeySize)
 	return fmt.Sprintf("%s%s$%s", hashPrefix, hex.EncodeToString(salt), hex.EncodeToString(dk))
 }
 
@@ -37,7 +37,7 @@ func legacyEncryptionKey(secret, salt []byte) []byte {
 	domainSalt = append(domainSalt, salt...)
 	domainSalt = append(domainSalt, ':')
 	domainSalt = append(domainSalt, "enc-v2"...)
-	return pbkdf2SHA256(secret, domainSalt, testLegacyPBKDF2Iter, derivedKeySize)
+	return kdf(secret, domainSalt, testLegacyPBKDF2Iter, derivedKeySize)
 }
 
 func writeLegacyV2Store(t *testing.T, secret []byte, content model.PwdFile) {

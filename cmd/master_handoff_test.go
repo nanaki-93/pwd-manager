@@ -7,7 +7,6 @@ import (
 
 	"github.com/nanaki-93/pwd-manager/internal/model"
 	"github.com/nanaki-93/pwd-manager/internal/utils"
-	"golang.org/x/crypto/pbkdf2"
 )
 
 func TestGeneratedKeyHandoffSurvivesDeferredWipe(t *testing.T) {
@@ -23,7 +22,7 @@ func TestGeneratedKeyHandoffSurvivesDeferredWipe(t *testing.T) {
 	}
 	// Replace the active key with an independently derived value. Successful
 	// decryption proves the saved store used that value, not a wiped buffer.
-	key := pbkdf2.Key(password, bytes.Repeat([]byte{0x51}, 32), 600_000, 32, sha256.New)
+	key := pbkdf2Key(password, bytes.Repeat([]byte{0x51}, 32), 600_000, 32, sha256.New)
 	defer clear(key)
 	utils.SetMasterKey(key)
 	loaded, err := utils.GetPwdObj()

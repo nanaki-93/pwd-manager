@@ -29,6 +29,7 @@ func readStoredSaltParams(t *testing.T, tmpHome string) (int, []byte) {
 }
 
 func TestDeriveKeyUsesStrongPBKDF2(t *testing.T) {
+	useRealKDF(t)
 	password := []byte("valid-master-secret")
 	salt := bytes.Repeat([]byte{0x5c}, keyDerivationSaltLen)
 	got, err := deriveKey(password, salt, keyDerivationIterations)
@@ -75,7 +76,7 @@ func TestRotateMasterKeyMigratesLegacySaltFile(t *testing.T) {
 	if iter != keyDerivationIterations || !bytes.Equal(salt, legacySalt) {
 		t.Fatalf("migrated salt file = (%d, %x), want (%d, %x)", iter, salt, keyDerivationIterations, legacySalt)
 	}
-	utils.SetMasterKey(pbkdf2.Key(password, legacySalt, keyDerivationIterations, encryptionKeyLen, sha256.New))
+	utils.SetMasterKey(pbkdf2Key(password, legacySalt, keyDerivationIterations, encryptionKeyLen, sha256.New))
 	if loaded, err := utils.GetPwdObj(); err != nil || loaded.MasterPassword != content.MasterPassword {
 		t.Fatalf("store not saved under key at %d iterations (err=%v)", keyDerivationIterations, err)
 	}

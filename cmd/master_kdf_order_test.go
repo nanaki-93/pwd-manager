@@ -10,7 +10,6 @@ import (
 
 	"github.com/nanaki-93/pwd-manager/internal/model"
 	"github.com/nanaki-93/pwd-manager/internal/utils"
-	"golang.org/x/crypto/pbkdf2"
 )
 
 // Observe the header at the save boundary, not just after rotation returns.
@@ -42,7 +41,7 @@ func TestRotateMasterKeyUpgradesRecordedHeaderBeforeSave(t *testing.T) {
 	if calls != 1 {
 		t.Fatalf("save calls = %d, want 1", calls)
 	}
-	utils.SetMasterKey(pbkdf2.Key(password, salt, keyDerivationIterations, encryptionKeyLen, sha256.New))
+	utils.SetMasterKey(pbkdf2Key(password, salt, keyDerivationIterations, encryptionKeyLen, sha256.New))
 	loaded, err := utils.GetPwdObj()
 	if err != nil || loaded.MasterPassword != content.MasterPassword || loaded.SavedPasswords["mail"] != "secret" {
 		t.Fatalf("store not encrypted at upgraded count: content=%+v, err=%v", loaded, err)

@@ -185,7 +185,7 @@ func TestVerifyMasterPassword_MalformedPBKDF2(t *testing.T) {
 func TestVerifyMasterPassword_SingleByteDerivedKey(t *testing.T) {
 	password := []byte("secret-master-password")
 	salt := make([]byte, saltSize)
-	oneByteDK := pbkdf2SHA256(password, salt, pbkdf2Iter, 1)
+	oneByteDK := kdf(password, salt, pbkdf2Iter, 1)
 	singleByteRecord := fmt.Sprintf("%s%s$%s", hashPrefix, hex.EncodeToString(salt), hex.EncodeToString(oneByteDK))
 	if VerifyMasterPassword(singleByteRecord, password) {
 		t.Errorf("VerifyMasterPassword(%q, %q) = true, want false (accepted single-byte derived key)", singleByteRecord, password)
