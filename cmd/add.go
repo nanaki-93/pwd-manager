@@ -141,19 +141,39 @@ func execAddCmd(cmd *cobra.Command, args []string) {
 		return
 	}
 
-	// The vault stores values as strings, so convert exactly once and wipe the
-	// prompted bytes immediately so no extra copy of the secret lingers.
 	pwdBytes := utils.PromptPassword("Insert the password for " + pwdName + ":")
-	pwdValue := string(pwdBytes)
-	clear(pwdBytes)
-	if err := storePassword(pwdObj, pwdName, pwdValue); err != nil {
+	if err := addPromptedPassword(pwdObj, pwdName, pwdBytes, addCopyFlag); err != nil {
 		utils.ManageErrorAndExit(err)
 		return
 	}
-	if addCopyFlag {
+}
+
+// addPromptedPassword stores the prompted secret and optionally copies it to
+// the clipboard. pwdBytes is always wiped before returning, on every path.
+//
+// This limits, but does not remove, copies of the secret in memory:
+//   - An empty secret is rejected on the bytes, before any string exists.
+//   - model.PwdFile stores values as strings, so the secret is converted to an
+//     immutable string exactly once. That string cannot be wiped: it stays in
+//     the vault map and in process memory until the garbage collector reuses it.
+//   - The same string (not a new copy) is handed to the vault save, which
+//     marshals it into a JSON buffer, and to the clipboard helper, which hands
+//     it to the OS clipboard. Neither copy is wiped by this command.
+//
+// Process memory, core dumps and swap can therefore still expose the secret.
+func addPromptedPassword(pwdObj model.PwdFile, pwdName string, pwdBytes []byte, copyToClipboard bool) error {
+	defer clear(pwdBytes)
+	if len(pwdBytes) == 0 {
+		return fmt.Errorf("save password %q: %w", pwdName, errEmptyPassword)
+	}
+	pwdValue := string(pwdBytes)
+	if err := storePassword(pwdObj, pwdName, pwdValue); err != nil {
+		return err
+	}
+	if copyToClipboard {
 		if err := copyPasswordToClipboard(pwdValue); err != nil {
-			utils.ManageErrorAndExit(fmt.Errorf("password %q saved, but %w", pwdName, err))
-			return
+			return fmt.Errorf("password %q saved, but %w", pwdName, err)
 		}
 	}
+	return nil
 }
