@@ -395,7 +395,7 @@ func TestCopyPasswordToClipboard_RetryAfterNewCopyDoesNothing(t *testing.T) {
 	}
 }
 
-func TestCopyPasswordToClipboard_NonPositiveTimeoutSkipsTimer(t *testing.T) {
+func TestCopyPasswordToClipboard_NonPositiveTimeoutUsesDefaultAndWarns(t *testing.T) {
 	for _, timeout := range []time.Duration{0, -5 * time.Second} {
 		t.Run(timeout.String(), func(t *testing.T) {
 			resetClipboardTestState(t)
@@ -405,6 +405,9 @@ func TestCopyPasswordToClipboard_NonPositiveTimeoutSkipsTimer(t *testing.T) {
 				currentClipboard = text
 				return nil
 			}
+			readClipboard = func() (string, error) { return currentClipboard, nil }
+			var warnings []error
+			reportClipboardClearFailure = func(err error) { warnings = append(warnings, err) }
 			clipboardClearTimeout = timeout
 			clipboardOS = "linux"
 
@@ -413,9 +416,10 @@ func TestCopyPasswordToClipboard_NonPositiveTimeoutSkipsTimer(t *testing.T) {
 				appliedFlags = append([]string(nil), flags...)
 			}
 
-			timerScheduled := false
+			var scheduledFn func()
+			var scheduled time.Duration
 			afterFunc = func(d time.Duration, f func()) *time.Timer {
-				timerScheduled = true
+				scheduled, scheduledFn = d, f
 				tm := time.NewTimer(time.Hour)
 				tm.Stop()
 				return tm
@@ -429,10 +433,17 @@ func TestCopyPasswordToClipboard_NonPositiveTimeoutSkipsTimer(t *testing.T) {
 			}
 			wantFlags := []string{"x-kde-passwordManagerHint=secret"}
 			if !reflect.DeepEqual(appliedFlags, wantFlags) {
-				t.Fatalf("expected concealed flags %v even when timeout is disabled, got %v", wantFlags, appliedFlags)
+				t.Fatalf("expected concealed flags %v, got %v", wantFlags, appliedFlags)
 			}
-			if timerScheduled {
-				t.Fatalf("expected no timer scheduled for timeout %v", timeout)
+			if scheduledFn == nil || scheduled != DefaultClipboardClearTimeout {
+				t.Fatalf("expected default timeout %v scheduled for %v, got %v", DefaultClipboardClearTimeout, timeout, scheduled)
+			}
+			if len(warnings) != 1 || !strings.Contains(warnings[0].Error(), "invalid clipboard clear timeout") {
+				t.Fatalf("expected a warning about the invalid timeout, got %v", warnings)
+			}
+			scheduledFn()
+			if currentClipboard != "" {
+				t.Fatalf("expected secret cleared at default expiry, got %q", currentClipboard)
 			}
 		})
 	}
@@ -563,7 +574,7 @@ func TestCopyPasswordToClipboard_StaleTimerInvalidatedWhenSubsequentCopyHasDisab
 		t.Fatalf("expected 1 callback scheduled, got %d", len(callbacks))
 	}
 
-	// Disable timeout for the second copy of the same password.
+	// A non-positive timeout on the second copy falls back to the default.
 	clipboardClearTimeout = 0
 	if err := copyPasswordToClipboard("same-secret"); err != nil {
 		t.Fatalf("unexpected error on second copy: %v", err)

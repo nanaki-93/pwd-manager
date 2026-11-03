@@ -136,7 +136,9 @@ func showPasswordsMenu() {
 
 // copyPasswordToClipboard writes pwd to the system clipboard, records
 // platform-specific concealed/transient metadata hints, and schedules automatic
-// clearing after clipboardClearTimeout if the clipboard still holds pwd.
+// clearing after clipboardClearTimeout if the clipboard still holds pwd. A
+// non-positive clipboardClearTimeout is reported and replaced by
+// DefaultClipboardClearTimeout, so a copied password is always cleared.
 func copyPasswordToClipboard(pwd string) error {
 	clipboardMu.Lock()
 	clipboardToken++
@@ -161,13 +163,17 @@ func copyPasswordToClipboard(pwd string) error {
 	goos := clipboardOS
 	timeout := clipboardClearTimeout
 	scheduleFn := afterFunc
+	report := reportClipboardClearFailure
 	clipboardMu.Unlock()
 
 	flags := ConcealedClipboardFlags(goos)
 	markFn(flags)
 
 	if timeout <= 0 {
-		return nil
+		// Automatic clearing cannot be disabled: a non-positive timeout is
+		// treated as a misconfiguration and replaced by the safe default.
+		report(fmt.Errorf("invalid clipboard clear timeout %v; using default %v", timeout, DefaultClipboardClearTimeout))
+		timeout = DefaultClipboardClearTimeout
 	}
 	timeout = effectiveClearTimeout(timeout, flags)
 
