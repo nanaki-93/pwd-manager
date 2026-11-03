@@ -85,6 +85,7 @@ func TestCopyPasswordToClipboard_ClearsMatchingSecretAfterTimeout(t *testing.T) 
 	var scheduledFn func()
 	var scheduledDuration time.Duration
 	clipboardClearTimeout = 15 * time.Second
+	clipboardOS = "linux"
 	afterFunc = func(d time.Duration, f func()) *time.Timer {
 		scheduledDuration = d
 		scheduledFn = f
@@ -118,25 +119,14 @@ func TestCopyPasswordToClipboard_DefaultRetentionAndConcealedFlagsWorkflow(t *te
 	}
 
 	platforms := []struct {
-		goos      string
-		wantFlags []string
+		goos        string
+		wantFlags   []string
+		wantTimeout time.Duration
 	}{
-		{
-			goos:      "darwin",
-			wantFlags: []string{"org.nspasteboard.ConcealedType", "org.nspasteboard.TransientType"},
-		},
-		{
-			goos:      "linux",
-			wantFlags: []string{"x-kde-passwordManagerHint=secret"},
-		},
-		{
-			goos:      "windows",
-			wantFlags: []string{"ExcludeClipboardContentFromMonitorProcessing", "CanIncludeInClipboardHistory=false"},
-		},
-		{
-			goos:      "freebsd",
-			wantFlags: nil,
-		},
+		{"darwin", []string{"org.nspasteboard.ConcealedType", "org.nspasteboard.TransientType"}, DefaultClipboardClearTimeout},
+		{"linux", []string{"x-kde-passwordManagerHint=secret"}, DefaultClipboardClearTimeout},
+		{"windows", []string{"ExcludeClipboardContentFromMonitorProcessing", "CanIncludeInClipboardHistory=false"}, DefaultClipboardClearTimeout},
+		{"freebsd", nil, UnhintedClipboardClearTimeout},
 	}
 
 	for _, tc := range platforms {
@@ -181,8 +171,8 @@ func TestCopyPasswordToClipboard_DefaultRetentionAndConcealedFlagsWorkflow(t *te
 			if !reflect.DeepEqual(appliedFlags, tc.wantFlags) {
 				t.Fatalf("expected concealed flags %v, got %v", tc.wantFlags, appliedFlags)
 			}
-			if scheduledDuration != DefaultClipboardClearTimeout {
-				t.Fatalf("expected scheduled timeout %v, got %v", DefaultClipboardClearTimeout, scheduledDuration)
+			if scheduledDuration != tc.wantTimeout {
+				t.Fatalf("expected scheduled timeout %v, got %v", tc.wantTimeout, scheduledDuration)
 			}
 
 			scheduledFn()
@@ -231,6 +221,44 @@ func TestConcealedClipboardFlags_PlatformEvaluation(t *testing.T) {
 			got := ConcealedClipboardFlags(tc.goos)
 			if !reflect.DeepEqual(got, tc.want) {
 				t.Fatalf("ConcealedClipboardFlags(%q) = %v, want %v", tc.goos, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestCopyPasswordToClipboard_UnhintedPlatformsUseShorterRetention(t *testing.T) {
+	if UnhintedClipboardClearTimeout >= DefaultClipboardClearTimeout {
+		t.Fatalf("expected unhinted timeout %v below default %v", UnhintedClipboardClearTimeout, DefaultClipboardClearTimeout)
+	}
+	tests := []struct {
+		goos       string
+		configured time.Duration
+		want       time.Duration
+	}{
+		{goos: "plan9", configured: DefaultClipboardClearTimeout, want: UnhintedClipboardClearTimeout},
+		{goos: "openbsd", configured: time.Minute, want: UnhintedClipboardClearTimeout},
+		{goos: "", configured: DefaultClipboardClearTimeout, want: UnhintedClipboardClearTimeout},
+		{goos: "netbsd", configured: 2 * time.Second, want: 2 * time.Second},
+		{goos: "linux", configured: time.Minute, want: time.Minute},
+	}
+	for _, tc := range tests {
+		t.Run(tc.goos+"/"+tc.configured.String(), func(t *testing.T) {
+			resetClipboardTestState(t)
+			writeClipboard = func(string) error { return nil }
+			clipboardOS = tc.goos
+			clipboardClearTimeout = tc.configured
+			var got time.Duration
+			afterFunc = func(d time.Duration, f func()) *time.Timer {
+				got = d
+				tm := time.NewTimer(time.Hour)
+				tm.Stop()
+				return tm
+			}
+			if err := copyPasswordToClipboard("secret123"); err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if got != tc.want {
+				t.Fatalf("goos %q: expected scheduled timeout %v, got %v", tc.goos, tc.want, got)
 			}
 		})
 	}

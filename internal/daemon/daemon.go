@@ -24,6 +24,16 @@ import (
 // minimize exposure.
 const DefaultClipboardClearTimeout = 10 * time.Second
 
+// UnhintedClipboardClearTimeout caps the retention window on platforms where
+// no concealed/transient clipboard hints are known (for example the BSDs,
+// plan9 or any GOOS other than darwin, linux and windows). Without hints,
+// clipboard history tools may persist the secret, so it is cleared sooner.
+//
+// Coverage note: on linux only the KDE hint (x-kde-passwordManagerHint) is
+// applied; clipboard managers on other desktops may ignore it and record the
+// entry in their history.
+const UnhintedClipboardClearTimeout = 5 * time.Second
+
 var (
 	clipboardClearTimeout  = DefaultClipboardClearTimeout
 	writeClipboard         = clipboard.WriteAll
@@ -142,11 +152,13 @@ func copyPasswordToClipboard(pwd string) error {
 	scheduleFn := afterFunc
 	clipboardMu.Unlock()
 
-	markFn(ConcealedClipboardFlags(goos))
+	flags := ConcealedClipboardFlags(goos)
+	markFn(flags)
 
 	if timeout <= 0 {
 		return nil
 	}
+	timeout = effectiveClearTimeout(timeout, flags)
 
 	clipboardMu.Lock()
 	defer clipboardMu.Unlock()
@@ -159,6 +171,15 @@ func copyPasswordToClipboard(pwd string) error {
 	})
 
 	return nil
+}
+
+// effectiveClearTimeout shortens a positive timeout to
+// UnhintedClipboardClearTimeout when no concealment hints can be applied.
+func effectiveClearTimeout(timeout time.Duration, flags []string) time.Duration {
+	if len(flags) == 0 && timeout > UnhintedClipboardClearTimeout {
+		return UnhintedClipboardClearTimeout
+	}
+	return timeout
 }
 
 func clearClipboardIfTokenMatches(token uint64, pwd string) {
