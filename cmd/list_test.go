@@ -379,14 +379,76 @@ func TestWriteListJSONOutput_ShowsPlaintextWhenFlagSet(t *testing.T) {
 		t.Fatalf("expected no error, got %v", err)
 	}
 
-	var parsed map[string]string
-	if err := json.Unmarshal(buf.Bytes(), &parsed); err != nil {
-		t.Fatalf("output is not valid JSON: %v", err)
+	if err := checkJSONEntries(buf.Bytes(), saved); err != nil {
+		t.Fatalf("unexpected plaintext JSON output %q: %v", buf.String(), err)
 	}
-	for k, want := range saved {
-		if got, ok := parsed[k]; !ok || got != want {
-			t.Fatalf("for key %q: got %q (ok=%v), want %q", k, got, ok, want)
+}
+
+// checkJSONEntries reports whether raw is a JSON object holding exactly the
+// entries of want: no missing, changed, extra or duplicated keys.
+func checkJSONEntries(raw []byte, want map[string]string) error {
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	if tok, err := dec.Token(); err != nil || tok != json.Delim('{') {
+		return fmt.Errorf("expected JSON object start, got %v (err=%v)", tok, err)
+	}
+	seen := make(map[string]bool, len(want))
+	for dec.More() {
+		tok, err := dec.Token()
+		if err != nil {
+			return fmt.Errorf("read key: %w", err)
 		}
+		key, ok := tok.(string)
+		if !ok {
+			return fmt.Errorf("expected string key, got %v", tok)
+		}
+		var val string
+		if err := dec.Decode(&val); err != nil {
+			return fmt.Errorf("decode value for key %q: %w", key, err)
+		}
+		if seen[key] {
+			return fmt.Errorf("duplicated key %q", key)
+		}
+		seen[key] = true
+		exp, ok := want[key]
+		if !ok {
+			return fmt.Errorf("unexpected extra key %q", key)
+		}
+		if val != exp {
+			return fmt.Errorf("for key %q: got %q, want %q", key, val, exp)
+		}
+	}
+	if len(seen) != len(want) {
+		return fmt.Errorf("got %d keys, want %d", len(seen), len(want))
+	}
+	if _, err := dec.Token(); err != nil {
+		return fmt.Errorf("read object end: %w", err)
+	}
+	return nil
+}
+
+func TestCheckJSONEntries_RejectsExtraDuplicateAndMissingKeys(t *testing.T) {
+	want := map[string]string{"email": "hunter2", "github": "s1"}
+	for _, tc := range []struct {
+		name string
+		raw  string
+		ok   bool
+	}{
+		{name: "exact", raw: `{"email":"hunter2","github":"s1"}`, ok: true},
+		{name: "extra key", raw: `{"email":"hunter2","github":"s1","bank":"x"}`},
+		{name: "duplicated key", raw: `{"email":"hunter2","github":"s1","email":"hunter2"}`},
+		{name: "missing key", raw: `{"email":"hunter2"}`},
+		{name: "changed value", raw: `{"email":"hunter2","github":"s2"}`},
+		{name: "not an object", raw: `["email"]`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := checkJSONEntries([]byte(tc.raw), want)
+			if tc.ok && err != nil {
+				t.Fatalf("expected match, got %v", err)
+			}
+			if !tc.ok && err == nil {
+				t.Fatalf("expected mismatch for %s", tc.raw)
+			}
+		})
 	}
 }
 
