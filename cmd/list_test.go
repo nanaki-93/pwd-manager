@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"io"
 	"strings"
 	"testing"
 )
@@ -16,18 +17,52 @@ func (e errWriter) Write(_ []byte) (int, error) {
 	return 0, e.err
 }
 
-type failAfterNWriter struct {
+// failAfterNBytesWriter accepts at most remaining bytes and then fails, so
+// the partial output it records does not depend on how many Write calls the
+// writer under test makes.
+type failAfterNBytesWriter struct {
 	remaining int
 	err       error
 	buf       bytes.Buffer
 }
 
-func (w *failAfterNWriter) Write(p []byte) (int, error) {
-	if w.remaining <= 0 {
-		return 0, w.err
+func (w *failAfterNBytesWriter) Write(p []byte) (int, error) {
+	if len(p) <= w.remaining {
+		w.remaining -= len(p)
+		return w.buf.Write(p)
 	}
-	w.remaining--
-	return w.buf.Write(p)
+	n, _ := w.buf.Write(p[:w.remaining])
+	w.remaining = 0
+	return n, w.err
+}
+
+// byteSplitWriter forwards each byte in its own Write call.
+type byteSplitWriter struct {
+	w io.Writer
+}
+
+func (s byteSplitWriter) Write(p []byte) (int, error) {
+	for i := range p {
+		if _, err := s.w.Write(p[i : i+1]); err != nil {
+			return i, err
+		}
+	}
+	return len(p), nil
+}
+
+// wholeBufferWriter collects all output and forwards it in a single Write.
+type wholeBufferWriter struct {
+	w   io.Writer
+	buf bytes.Buffer
+}
+
+func (b *wholeBufferWriter) Write(p []byte) (int, error) {
+	return b.buf.Write(p)
+}
+
+func (b *wholeBufferWriter) flush() error {
+	_, err := b.w.Write(b.buf.Bytes())
+	return err
 }
 
 func TestWriteListOutput_MasksByDefault(t *testing.T) {
@@ -137,15 +172,50 @@ func TestWriteListOutput_MidStreamWriteError(t *testing.T) {
 		"second": "secret-2",
 	}
 	boom := errors.New("short write on second entry")
-	w := &failAfterNWriter{remaining: 1, err: boom}
+	wantPartial := "first: ********\n"
+	w := &failAfterNBytesWriter{remaining: len(wantPartial), err: boom}
 
 	err := writeListOutput(w, saved, false)
 	if !errors.Is(err, boom) {
 		t.Fatalf("expected wrapped error %v, got %v", boom, err)
 	}
-	if w.buf.String() != "first: ********\n" {
+	if w.buf.String() != wantPartial {
 		t.Fatalf("unexpected partial output before error: %q", w.buf.String())
 	}
+}
+
+func TestWriteListOutput_MidStreamWriteErrorIndependentOfWriteCalls(t *testing.T) {
+	saved := map[string]string{
+		"first":  "secret-1",
+		"second": "secret-2",
+	}
+	boom := errors.New("short write on second entry")
+	wantPartial := "first: ********\n"
+
+	t.Run("split into single-byte writes", func(t *testing.T) {
+		sink := &failAfterNBytesWriter{remaining: len(wantPartial), err: boom}
+		err := writeListOutput(byteSplitWriter{w: sink}, saved, false)
+		if !errors.Is(err, boom) {
+			t.Fatalf("expected wrapped error %v, got %v", boom, err)
+		}
+		if sink.buf.String() != wantPartial {
+			t.Fatalf("unexpected partial output before error: %q", sink.buf.String())
+		}
+	})
+
+	t.Run("whole output in one write", func(t *testing.T) {
+		sink := &failAfterNBytesWriter{remaining: len(wantPartial), err: boom}
+		bw := &wholeBufferWriter{w: sink}
+		if err := writeListOutput(bw, saved, false); err != nil {
+			t.Fatalf("expected no error while buffering, got %v", err)
+		}
+		if err := bw.flush(); !errors.Is(err, boom) {
+			t.Fatalf("expected error %v on flush, got %v", boom, err)
+		}
+		if sink.buf.String() != wantPartial {
+			t.Fatalf("unexpected partial output before error: %q", sink.buf.String())
+		}
+	})
 }
 
 func TestListCmd_ShowFlagRegistered(t *testing.T) {
