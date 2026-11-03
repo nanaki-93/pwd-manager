@@ -196,16 +196,26 @@ func rotateMasterKey(password []byte, content model.PwdFile) error {
 		return err
 	}
 	defer pending.wipe()
+	return pending.install(&content)
+}
+
+// install writes the salt and puts the key into use. With content it re-saves
+// the store under the key and only then removes the legacy key file; without
+// content the store is not re-encrypted, so the legacy key file is kept.
+func (p *pendingKey) install(content *model.PwdFile) error {
 	if err := checkLegacyKeyFile(); err != nil {
 		return err
 	}
 	// The salt is written first so a saved store never depends on an unsaved
 	// salt; an existing salt keeps its bytes and only gains the parameter header.
-	if err := pending.persistSalt(); err != nil {
+	if err := p.persistSalt(); err != nil {
 		return err
 	}
-	utils.SetMasterKey(pending.key)
-	if err := saveStore(content, nil); err != nil {
+	utils.SetMasterKey(p.key)
+	if content == nil {
+		return nil
+	}
+	if err := saveStore(*content, nil); err != nil {
 		utils.SetMasterKey(nil)
 		return fmt.Errorf("save store with new master key: %w", err)
 	}
@@ -236,14 +246,20 @@ func generateKey(password ...[]byte) error {
 	if err := checkLegacyKeyFile(); err != nil {
 		return err
 	}
-	if err := pending.persistSalt(); err != nil {
-		return err
+	// A store that may depend on the legacy key file is migrated to the new key
+	// before that file is removed; one that cannot be read now keeps the file.
+	content, err := utils.GetPwdObj()
+	switch {
+	case err == nil:
+		return pending.install(&content)
+	case errors.Is(err, os.ErrNotExist):
+		if err := pending.install(nil); err != nil {
+			return err
+		}
+		return removeLegacyKeyFile()
+	default:
+		return pending.install(nil)
 	}
-	if err := removeLegacyKeyFile(); err != nil {
-		return err
-	}
-	utils.SetMasterKey(pending.key)
-	return nil
 }
 
 // pendingKey is a derived key that has not been put into use yet.
