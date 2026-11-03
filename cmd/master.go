@@ -285,19 +285,12 @@ func readKeySalt(salt []byte) (int, bool, error) {
 	if err != nil {
 		return 0, false, err
 	}
-	info, err := os.Lstat(saltPath)
+	data, err := readRegularFileNoFollow(saltPath, keyDerivationSaltFile)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return 0, false, nil
 		}
-		return 0, false, fmt.Errorf("stat salt file: %w", err)
-	}
-	if !info.Mode().IsRegular() {
-		return 0, false, &os.PathError{Op: "open", Path: keyDerivationSaltFile, Err: errors.New("not a regular file")}
-	}
-	data, err := os.ReadFile(saltPath)
-	if err != nil {
-		return 0, false, fmt.Errorf("read salt file: %w", err)
+		return 0, false, err
 	}
 	defer clear(data)
 	iterations, raw, err := parseKeySalt(data, len(salt))
@@ -306,6 +299,45 @@ func readKeySalt(salt []byte) (int, bool, error) {
 	}
 	copy(salt, raw)
 	return iterations, true, nil
+}
+
+// openKeyFile opens a key file for reading; a variable so tests can swap the
+// path between the symlink check and the open.
+var openKeyFile = os.Open
+
+// readRegularFileNoFollow reads path only when it is a regular file that is not
+// a symlink. The opened handle is compared with the checked path, so a symlink
+// or other file swapped in after the check is refused instead of read.
+func readRegularFileNoFollow(path, name string) ([]byte, error) {
+	notRegular := &os.PathError{Op: "open", Path: name, Err: errors.New("not a regular file")}
+	info, err := os.Lstat(path)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, err
+		}
+		return nil, fmt.Errorf("stat salt file: %w", err)
+	}
+	if !info.Mode().IsRegular() {
+		return nil, notRegular
+	}
+	f, err := openKeyFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("open salt file: %w", err)
+	}
+	defer f.Close()
+	opened, err := f.Stat()
+	if err != nil {
+		return nil, fmt.Errorf("stat opened salt file: %w", err)
+	}
+	if !opened.Mode().IsRegular() || !os.SameFile(info, opened) {
+		return nil, notRegular
+	}
+	data, err := io.ReadAll(f)
+	if err != nil {
+		clear(data)
+		return nil, fmt.Errorf("read salt file: %w", err)
+	}
+	return data, nil
 }
 
 func parseKeySalt(data []byte, saltLen int) (int, []byte, error) {
