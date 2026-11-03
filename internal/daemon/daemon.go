@@ -2,7 +2,9 @@ package daemon
 
 import (
 	"crypto/subtle"
+	"errors"
 	"fmt"
+	"os"
 	"runtime"
 	"sync"
 	"time"
@@ -41,6 +43,15 @@ var (
 	afterFunc              = time.AfterFunc
 	clipboardOS            = runtime.GOOS
 	markClipboardConcealed = func(flags []string) {}
+
+	// clipboardClearRetryDelays bounds the backoff used when reading the
+	// clipboard fails at expiry; its length is the number of retries.
+	clipboardClearRetryDelays = []time.Duration{250 * time.Millisecond, 500 * time.Millisecond, time.Second}
+	// reportClipboardClearFailure surfaces clipboard clearing problems so the
+	// user knows the password may still be on the clipboard.
+	reportClipboardClearFailure = func(err error) {
+		fmt.Fprintf(os.Stderr, "pwd-manager: clipboard auto-clear: %v\n", err)
+	}
 
 	clipboardMu    sync.Mutex
 	clipboardTimer *time.Timer
@@ -183,6 +194,14 @@ func effectiveClearTimeout(timeout time.Duration, flags []string) time.Duration 
 }
 
 func clearClipboardIfTokenMatches(token uint64, pwd string) {
+	clearClipboardAttempt(token, pwd, 0)
+}
+
+// clearClipboardAttempt verifies the clipboard still holds pwd and clears it.
+// A failed read is retried after clipboardClearRetryDelays[attempt]; once the
+// retries are exhausted the clipboard is cleared without verification while
+// the token is still active, and the failure is reported.
+func clearClipboardAttempt(token uint64, pwd string, attempt int) {
 	clipboardMu.Lock()
 	if clipboardToken != token {
 		clipboardMu.Unlock()
@@ -193,6 +212,7 @@ func clearClipboardIfTokenMatches(token uint64, pwd string) {
 
 	current, err := readFn()
 	if err != nil {
+		handleClearReadFailure(token, pwd, attempt, err)
 		return
 	}
 	if subtle.ConstantTimeCompare([]byte(current), []byte(pwd)) != 1 {
@@ -205,7 +225,37 @@ func clearClipboardIfTokenMatches(token uint64, pwd string) {
 		return
 	}
 	writeFn := writeClipboard
+	report := reportClipboardClearFailure
 	clipboardMu.Unlock()
 
-	_ = writeFn("")
+	if err := writeFn(""); err != nil {
+		report(fmt.Errorf("clear password from clipboard: %w", err))
+	}
+}
+
+func handleClearReadFailure(token uint64, pwd string, attempt int, readErr error) {
+	clipboardMu.Lock()
+	if clipboardToken != token {
+		clipboardMu.Unlock()
+		return
+	}
+	report := reportClipboardClearFailure
+	if attempt < len(clipboardClearRetryDelays) {
+		delay := clipboardClearRetryDelays[attempt]
+		clipboardTimer = afterFunc(delay, func() {
+			clearClipboardAttempt(token, pwd, attempt+1)
+		})
+		clipboardMu.Unlock()
+		report(fmt.Errorf("read clipboard before clearing password (attempt %d, retrying in %v): %w", attempt+1, delay, readErr))
+		return
+	}
+	writeFn := writeClipboard
+	clipboardMu.Unlock()
+
+	err := fmt.Errorf("read clipboard before clearing password (attempt %d, giving up): %w", attempt+1, readErr)
+	if werr := writeFn(""); werr != nil {
+		report(errors.Join(err, fmt.Errorf("clear password from clipboard: %w; the password may still be on the clipboard", werr)))
+		return
+	}
+	report(fmt.Errorf("%w; clipboard cleared without verification", err))
 }

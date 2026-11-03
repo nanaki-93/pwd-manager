@@ -17,6 +17,9 @@ func resetClipboardTestState(t *testing.T) {
 	origTimeout := clipboardClearTimeout
 	origOS := clipboardOS
 	origMarkConcealed := markClipboardConcealed
+	origReport := reportClipboardClearFailure
+	origRetryDelays := clipboardClearRetryDelays
+	reportClipboardClearFailure = func(error) {}
 
 	t.Cleanup(func() {
 		clipboardMu.Lock()
@@ -33,6 +36,8 @@ func resetClipboardTestState(t *testing.T) {
 		clipboardClearTimeout = origTimeout
 		clipboardOS = origOS
 		markClipboardConcealed = origMarkConcealed
+		reportClipboardClearFailure = origReport
+		clipboardClearRetryDelays = origRetryDelays
 	})
 }
 
@@ -297,36 +302,96 @@ func TestCopyPasswordToClipboard_PreservesChangedClipboardOnTimeout(t *testing.T
 	}
 }
 
-func TestCopyPasswordToClipboard_ReadErrorOnTimeoutDoesNotClear(t *testing.T) {
+// readFailureHarness fakes a clipboard whose first failReads reads fail and
+// records scheduled callbacks and reported errors.
+type readFailureHarness struct {
+	clipboard string
+	failReads int
+	reads     int
+	delays    []time.Duration
+	callbacks []func()
+	reported  []error
+}
+
+func newReadFailureHarness(t *testing.T, failReads int) *readFailureHarness {
+	t.Helper()
 	resetClipboardTestState(t)
-
-	writes := 0
-	writeClipboard = func(text string) error {
-		writes++
-		return nil
-	}
+	h := &readFailureHarness{failReads: failReads}
+	writeClipboard = func(text string) error { h.clipboard = text; return nil }
 	readClipboard = func() (string, error) {
-		return "", errors.New("read failure")
+		h.reads++
+		if h.reads <= h.failReads {
+			return "", errReadFailure
+		}
+		return h.clipboard, nil
 	}
-
-	var scheduledFn func()
 	afterFunc = func(d time.Duration, f func()) *time.Timer {
-		scheduledFn = f
+		h.delays = append(h.delays, d)
+		h.callbacks = append(h.callbacks, f)
 		tm := time.NewTimer(time.Hour)
 		tm.Stop()
 		return tm
 	}
-
+	reportClipboardClearFailure = func(err error) { h.reported = append(h.reported, err) }
 	if err := copyPasswordToClipboard("secret123"); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if writes != 1 {
-		t.Fatalf("expected 1 clipboard write, got %d", writes)
+	return h
+}
+
+var errReadFailure = errors.New("read failure")
+
+func TestCopyPasswordToClipboard_ReadErrorOnTimeoutRetriesAndClears(t *testing.T) {
+	h := newReadFailureHarness(t, 1)
+
+	h.callbacks[0]()
+	if h.clipboard != "secret123" {
+		t.Fatalf("expected no clear before retry, got %q", h.clipboard)
+	}
+	if len(h.callbacks) != 2 || h.delays[1] != clipboardClearRetryDelays[0] {
+		t.Fatalf("expected a retry scheduled after %v, got delays %v", clipboardClearRetryDelays[0], h.delays)
+	}
+	if len(h.reported) != 1 || !errors.Is(h.reported[0], errReadFailure) {
+		t.Fatalf("expected read failure to be reported, got %v", h.reported)
 	}
 
-	scheduledFn()
-	if writes != 1 {
-		t.Fatalf("expected no clear write when read fails, got %d total writes", writes)
+	h.callbacks[1]()
+	if h.clipboard != "" {
+		t.Fatalf("expected retry to clear clipboard, got %q", h.clipboard)
+	}
+	if h.reads != 2 {
+		t.Fatalf("expected 2 reads, got %d", h.reads)
+	}
+}
+
+func TestCopyPasswordToClipboard_PersistentReadErrorClearsAfterBoundedRetries(t *testing.T) {
+	h := newReadFailureHarness(t, 1000)
+
+	for i := 0; i < len(h.callbacks); i++ {
+		h.callbacks[i]()
+	}
+	if want := len(clipboardClearRetryDelays) + 1; h.reads != want {
+		t.Fatalf("expected %d bounded read attempts, got %d", want, h.reads)
+	}
+	if h.clipboard != "" {
+		t.Fatalf("expected clipboard cleared after retries were exhausted, got %q", h.clipboard)
+	}
+	last := h.reported[len(h.reported)-1]
+	if !errors.Is(last, errReadFailure) || !strings.Contains(last.Error(), "giving up") {
+		t.Fatalf("expected final failure report, got %v", last)
+	}
+}
+
+func TestCopyPasswordToClipboard_RetryAfterNewCopyDoesNothing(t *testing.T) {
+	h := newReadFailureHarness(t, 1)
+	h.callbacks[0]()
+
+	if err := copyPasswordToClipboard("other-secret"); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	h.callbacks[1]()
+	if h.clipboard != "other-secret" || h.reads != 1 {
+		t.Fatalf("expected stale retry to skip, clipboard %q reads %d", h.clipboard, h.reads)
 	}
 }
 
