@@ -90,7 +90,7 @@ func blockScalarLines(lines []string) []string {
 	return out
 }
 
-func runHookScript(t *testing.T, script, pathEnv, skipEnv string) (int, string, string) {
+func runHookScript(t *testing.T, script, pathEnv, skipEnv string, extraEnv ...string) (int, string, string) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -100,6 +100,7 @@ func runHookScript(t *testing.T, script, pathEnv, skipEnv string) (int, string, 
 	if skipEnv != "" {
 		cmd.Env = append(cmd.Env, "SKIP_GITLEAKS="+skipEnv)
 	}
+	cmd.Env = append(cmd.Env, extraEnv...)
 
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
@@ -195,15 +196,41 @@ func TestParseGitleaksRunScriptScopedToGitleaksBlock(t *testing.T) {
 	}
 }
 
-func TestLefthookGitleaksPresent(t *testing.T) {
-	script := extractGitleaksRunScript(t, "lefthook.yml")
+func writeFakeGitleaks(t *testing.T) string {
+	t.Helper()
 	binDir := t.TempDir()
-	fakeGitleaks := filepath.Join(binDir, "gitleaks")
-
 	stub := "#!/bin/sh\necho \"args:$*\"\nexit ${FAKE_GITLEAKS_EXIT:-0}\n"
-	if err := os.WriteFile(fakeGitleaks, []byte(stub), 0o755); err != nil {
+	if err := os.WriteFile(filepath.Join(binDir, "gitleaks"), []byte(stub), 0o755); err != nil {
 		t.Fatalf("write fake gitleaks: %v", err)
 	}
+	return binDir
+}
+
+func TestLefthookGitleaksLeakDetectedBlocksCommit(t *testing.T) {
+	script := extractGitleaksRunScript(t, "lefthook.yml")
+	binDir := writeFakeGitleaks(t)
+
+	for _, skipEnv := range []string{"", "1"} {
+		t.Run("SKIP_GITLEAKS="+skipEnv, func(t *testing.T) {
+			code, stdout, stderr := runHookScript(t, script, binDir, skipEnv, "FAKE_GITLEAKS_EXIT=7")
+			if code != 7 {
+				t.Fatalf("exit code = %d, want scanner status 7 (stderr: %q)", code, stderr)
+			}
+			if !strings.Contains(stdout, "args:protect --staged") {
+				t.Fatalf("stdout = %q, want scanner to have run", stdout)
+			}
+			for _, unwanted := range []string{"warning", "skipping", "success"} {
+				if strings.Contains(strings.ToLower(stdout+stderr), unwanted) {
+					t.Fatalf("output contains %q on leak detection (stdout: %q, stderr: %q)", unwanted, stdout, stderr)
+				}
+			}
+		})
+	}
+}
+
+func TestLefthookGitleaksPresent(t *testing.T) {
+	script := extractGitleaksRunScript(t, "lefthook.yml")
+	binDir := writeFakeGitleaks(t)
 
 	code, stdout, stderr := runHookScript(t, script, binDir, "")
 	if code != 0 {
