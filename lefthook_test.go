@@ -19,45 +19,75 @@ func extractGitleaksRunScript(t *testing.T, path string) string {
 		t.Fatalf("read %s: %v", path, err)
 	}
 
-	lines := strings.Split(string(data), "\n")
-	inGitleaks := false
-	inRun := false
-	runIndent := 0
-	var scriptLines []string
+	script, err := parseGitleaksRunScript(string(data))
+	if err != nil {
+		t.Fatalf("extract gitleaks run script from %s: %v", path, err)
+	}
+	return script
+}
 
-	for _, line := range lines {
+func lineIndent(line string) int {
+	return len(line) - len(strings.TrimLeft(line, " "))
+}
+
+// parseGitleaksRunScript returns the `run: |` block scalar that belongs to the
+// gitleaks command. A `run: |` outside the gitleaks block is never accepted.
+func parseGitleaksRunScript(data string) (string, error) {
+	lines := strings.Split(data, "\n")
+	gitleaksIndent := -1
+	runStart := -1
+	for i, line := range lines {
 		trimmed := strings.TrimSpace(line)
-		if !inGitleaks {
+		if gitleaksIndent < 0 {
 			if trimmed == "gitleaks:" {
-				inGitleaks = true
+				gitleaksIndent = lineIndent(line)
 			}
 			continue
 		}
-		if !inRun {
-			if strings.HasPrefix(trimmed, "run: |") {
-				inRun = true
-			}
+		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
 			continue
 		}
-		if trimmed == "" {
-			scriptLines = append(scriptLines, "")
+		if lineIndent(line) <= gitleaksIndent {
+			return "", errors.New("gitleaks block ended before a `run: |` block was found")
+		}
+		if strings.HasPrefix(trimmed, "run: |") {
+			runStart = i + 1
+			break
+		}
+	}
+	if gitleaksIndent < 0 {
+		return "", errors.New("no `gitleaks:` command found")
+	}
+	if runStart < 0 {
+		return "", errors.New("no `run: |` block found inside the gitleaks block")
+	}
+	script := strings.TrimSpace(strings.Join(blockScalarLines(lines[runStart:]), "\n"))
+	if script == "" {
+		return "", errors.New("gitleaks `run: |` block is empty")
+	}
+	return script, nil
+}
+
+// blockScalarLines returns the lines of a block scalar body, dedented by the
+// indentation of its first non-blank line.
+func blockScalarLines(lines []string) []string {
+	runIndent := -1
+	var out []string
+	for _, line := range lines {
+		if strings.TrimSpace(line) == "" {
+			out = append(out, "")
 			continue
 		}
-		indent := len(line) - len(strings.TrimLeft(line, " "))
-		if runIndent == 0 {
+		indent := lineIndent(line)
+		if runIndent < 0 {
 			runIndent = indent
 		}
 		if indent < runIndent {
 			break
 		}
-		scriptLines = append(scriptLines, line[runIndent:])
+		out = append(out, line[runIndent:])
 	}
-
-	script := strings.TrimSpace(strings.Join(scriptLines, "\n"))
-	if script == "" {
-		t.Fatalf("failed to extract gitleaks run script from %s", path)
-	}
-	return script
+	return out
 }
 
 func runHookScript(t *testing.T, script, pathEnv, skipEnv string) (int, string, string) {
@@ -133,6 +163,35 @@ func TestLefthookGitleaksMissingAndOptOut(t *testing.T) {
 				t.Fatalf("stderr = %q, want substring %q", stderr, tc.wantStderr)
 			}
 		})
+	}
+}
+
+func TestParseGitleaksRunScriptScopedToGitleaksBlock(t *testing.T) {
+	later := "    other:\n      run: |\n        echo other\n"
+	tests := []struct {
+		name string
+		yaml string
+	}{
+		{"inline run", "  commands:\n    gitleaks:\n      run: gitleaks protect\n" + later},
+		{"folded run", "  commands:\n    gitleaks:\n      run: >\n        gitleaks protect\n" + later},
+		{"no run", "  commands:\n    gitleaks:\n      glob: \"*\"\n" + later},
+		{"renamed", "  commands:\n    secrets:\n      run: gitleaks protect\n" + later},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			script, err := parseGitleaksRunScript(tc.yaml)
+			if err == nil {
+				t.Fatalf("parseGitleaksRunScript() = %q, want error", script)
+			}
+		})
+	}
+
+	script, err := parseGitleaksRunScript("  commands:\n    gitleaks:\n\n      run: |\n        echo ok\n" + later)
+	if err != nil {
+		t.Fatalf("parseGitleaksRunScript() error = %v", err)
+	}
+	if script != "echo ok" {
+		t.Fatalf("parseGitleaksRunScript() = %q, want %q", script, "echo ok")
 	}
 }
 
