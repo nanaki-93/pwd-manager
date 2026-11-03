@@ -295,17 +295,19 @@ func TestPersistentPreRunELoadsAndPropagatesError(t *testing.T) {
 
 func TestInitConfigDoesNotExitOnMissingHomeAndUpdatesContextOnSuccess(t *testing.T) {
 	origCfgFile := cfgFile
-	origHome := os.Getenv("HOME")
 	origCtx := rootCmd.Context()
 	t.Cleanup(func() {
 		cfgFile = origCfgFile
-		_ = os.Setenv("HOME", origHome)
 		rootCmd.SetContext(origCtx)
 		rootCmd.SetErr(nil)
 	})
 
 	cfgFile = ""
-	_ = os.Unsetenv("HOME")
+	// t.Setenv records whether HOME was set and restores that exact state.
+	t.Setenv("HOME", "")
+	if err := os.Unsetenv("HOME"); err != nil {
+		t.Fatalf("unset HOME: %v", err)
+	}
 
 	var stderr bytes.Buffer
 	rootCmd.SetErr(&stderr)
@@ -330,5 +332,18 @@ func TestInitConfigDoesNotExitOnMissingHomeAndUpdatesContextOnSuccess(t *testing
 	}
 	if cfg.ConfigFileUsed != cfgPath {
 		t.Fatalf("expected ConfigFileUsed %q, got %q", cfgPath, cfg.ConfigFileUsed)
+	}
+}
+
+func TestInitConfigMissingHomeTestLeavesUnsetHomeUnset(t *testing.T) {
+	t.Setenv("HOME", "")
+	if err := os.Unsetenv("HOME"); err != nil {
+		t.Fatalf("unset HOME: %v", err)
+	}
+
+	t.Run("inner", TestInitConfigDoesNotExitOnMissingHomeAndUpdatesContextOnSuccess)
+
+	if home, ok := os.LookupEnv("HOME"); ok {
+		t.Fatalf("expected HOME to stay unset after the test, got %q", home)
 	}
 }
