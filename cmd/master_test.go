@@ -278,8 +278,9 @@ func TestGenerateKeyPersistsAndReusesSaltAcrossInvocations(t *testing.T) {
 		t.Fatalf("expected 1 randRead call on initial salt generation, got %d", randCalls)
 	}
 	saltPath := filepath.Join(tmpHome, keyDerivationSaltFile)
-	if persistedSalt, err := os.ReadFile(saltPath); err != nil || !bytes.Equal(persistedSalt, initialSalt) {
-		t.Fatalf("persisted salt = %x (err=%v), want %x", persistedSalt, err, initialSalt)
+	persisted, err := os.ReadFile(saltPath)
+	if _, persistedSalt, perr := parseKeySalt(persisted, keyDerivationSaltLen); err != nil || perr != nil || !bytes.Equal(persistedSalt, initialSalt) {
+		t.Fatalf("persisted salt = %x (err=%v, parse err=%v), want %x", persistedSalt, err, perr, initialSalt)
 	}
 
 	hashed, err := utils.HashMasterPassword(password)
@@ -474,11 +475,11 @@ func TestExecMasterCmdConfirmationBoundariesAndScanError(t *testing.T) {
 
 	exitCount := captureExit(t)
 	feedStdinInput(t, "", func() { execMasterCmd(masterCmd, nil) })
-	if *exitCount == 0 {
-		t.Fatalf("expected ManageErrorAndExit to be called on EOF when scanning confirmation")
+	if *exitCount != 0 {
+		t.Fatalf("expected EOF on confirmation to be treated as a decline, got %d exits", *exitCount)
 	}
 	if afterScanErr, err := utils.GetPwdObj(); err != nil || afterScanErr.MasterPassword != initialLoaded.MasterPassword {
-		t.Fatalf("expected master password to remain unchanged when confirmation scan fails (err=%v)", err)
+		t.Fatalf("expected master password to remain unchanged when confirmation input is closed (err=%v)", err)
 	}
 }
 
