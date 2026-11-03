@@ -651,3 +651,58 @@ func TestExecAddCmdPersistsAndCopiesOnSuccess(t *testing.T) {
 		t.Fatalf("expected saved password in vault, got %v", loaded.SavedPasswords)
 	}
 }
+
+func TestExecAddCmdZeroesPromptedPasswordBuffer(t *testing.T) {
+	seedExecAddVault(t, "valid-master-pass", nil)
+
+	origClip := clipboardWriteAll
+	origCopy := addCopyFlag
+	t.Cleanup(func() {
+		clipboardWriteAll = origClip
+		addCopyFlag = origCopy
+	})
+	var copied string
+	clipboardWriteAll = func(text string) error {
+		copied = text
+		return nil
+	}
+	addCopyFlag = true
+
+	secretBuf := []byte("zero-me-secret")
+	calls := 0
+	restore := utils.SetReadPasswordStdin(func() ([]byte, error) {
+		calls++
+		if calls == 1 {
+			return []byte("valid-master-pass"), nil
+		}
+		return secretBuf, nil
+	})
+	t.Cleanup(restore)
+	exitCount := captureExit(t)
+
+	_ = captureStdout(t, func() {
+		feedStdinInput(t, "github\n", func() {
+			execAddCmd(addCmd, nil)
+		})
+	})
+
+	if *exitCount != 0 {
+		t.Fatalf("expected no error exit, got %d", *exitCount)
+	}
+	for i, b := range secretBuf {
+		if b != 0 {
+			t.Fatalf("expected prompted password buffer zeroed, byte %d is %q (buffer %q)", i, b, secretBuf)
+		}
+	}
+	if copied != "zero-me-secret" {
+		t.Fatalf("expected password copied to clipboard, got %q", copied)
+	}
+	utils.SetMasterKey([]byte("valid-master-pass"))
+	loaded, err := utils.GetPwdObj()
+	if err != nil {
+		t.Fatalf("failed to reload vault: %v", err)
+	}
+	if loaded.SavedPasswords["github"] != "zero-me-secret" {
+		t.Fatalf("expected saved password in vault, got %v", loaded.SavedPasswords)
+	}
+}

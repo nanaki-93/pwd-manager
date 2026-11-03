@@ -103,12 +103,16 @@ func execAddCmd(cmd *cobra.Command, args []string) {
 		return
 	}
 
-	pwdValue := utils.PromptPassword("Insert the password for " + pwdName + ":")
-	if err := storePassword(pwdObj, pwdName, string(pwdValue)); err != nil {
+	// The vault stores values as strings, so convert exactly once and wipe the
+	// prompted bytes immediately so no extra copy of the secret lingers.
+	pwdBytes := utils.PromptPassword("Insert the password for " + pwdName + ":")
+	pwdValue := string(pwdBytes)
+	clear(pwdBytes)
+	if err := storePassword(pwdObj, pwdName, pwdValue); err != nil {
 		utils.ManageErrorAndExit(err)
 		return
 	}
 	if addCopyFlag {
-		_ = copyPasswordToClipboard(string(pwdValue))
+		_ = copyPasswordToClipboard(pwdValue)
 	}
 }
