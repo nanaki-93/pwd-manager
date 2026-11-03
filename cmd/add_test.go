@@ -383,6 +383,8 @@ func TestCaptureStdoutDrainsOutputLargerThanPipeBuffer(t *testing.T) {
 }
 
 func TestSavePasswordWhenMasterPasswordEmpty(t *testing.T) {
+	// Required: generateKey -> prepareKey -> utils.GoToHomeDir chdirs into
+	// tmpHome, which t.TempDir removes; restore the original working directory.
 	origWd, err := os.Getwd()
 	if err != nil {
 		t.Fatalf("failed to get working directory: %v", err)
