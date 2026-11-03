@@ -40,7 +40,8 @@ const (
 var randRead = io.ReadFull
 
 // userHomeDir resolves the home directory holding the salt and legacy key
-// files; a variable so tests can make it fail.
+// files and the default config file; a variable so tests can make it fail
+// regardless of which environment variable the platform reads.
 var userHomeDir = os.UserHomeDir
 
 // homeFilePath returns the absolute path of name in the user's home directory.

@@ -303,11 +303,11 @@ func TestInitConfigDoesNotExitOnMissingHomeAndUpdatesContextOnSuccess(t *testing
 	})
 
 	cfgFile = ""
-	// t.Setenv records whether HOME was set and restores that exact state.
-	t.Setenv("HOME", "")
-	if err := os.Unsetenv("HOME"); err != nil {
-		t.Fatalf("unset HOME: %v", err)
-	}
+	// Fail the lookup through the seam: os.UserHomeDir reads USERPROFILE on
+	// Windows and home on Plan 9, so unsetting HOME is not portable.
+	prevHome := userHomeDir
+	userHomeDir = func() (string, error) { return "", errors.New("home unavailable") }
+	t.Cleanup(func() { userHomeDir = prevHome })
 
 	var stderr bytes.Buffer
 	rootCmd.SetErr(&stderr)
@@ -329,6 +329,37 @@ func TestInitConfigDoesNotExitOnMissingHomeAndUpdatesContextOnSuccess(t *testing
 	cfg, ok := ConfigFromContext(rootCmd.Context())
 	if !ok || cfg == nil {
 		t.Fatal("expected initConfig to store Config in rootCmd context")
+	}
+	if cfg.ConfigFileUsed != cfgPath {
+		t.Fatalf("expected ConfigFileUsed %q, got %q", cfgPath, cfg.ConfigFileUsed)
+	}
+}
+
+func TestInitConfigResolvesDefaultConfigThroughUserHomeDir(t *testing.T) {
+	origCfgFile := cfgFile
+	origCtx := rootCmd.Context()
+	prevHome := userHomeDir
+	t.Cleanup(func() {
+		cfgFile = origCfgFile
+		userHomeDir = prevHome
+		rootCmd.SetContext(origCtx)
+		rootCmd.SetErr(nil)
+	})
+
+	home := t.TempDir()
+	cfgPath := filepath.Join(home, ".pwd-manager.yaml")
+	if err := os.WriteFile(cfgPath, []byte("mode: test\n"), 0o600); err != nil {
+		t.Fatalf("write temp config: %v", err)
+	}
+	userHomeDir = func() (string, error) { return home, nil }
+	cfgFile = ""
+	var stderr bytes.Buffer
+	rootCmd.SetErr(&stderr)
+
+	initConfig()
+	cfg, ok := ConfigFromContext(rootCmd.Context())
+	if !ok || cfg == nil {
+		t.Fatalf("expected config in context, stderr %q", stderr.String())
 	}
 	if cfg.ConfigFileUsed != cfgPath {
 		t.Fatalf("expected ConfigFileUsed %q, got %q", cfgPath, cfg.ConfigFileUsed)

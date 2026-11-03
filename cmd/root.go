@@ -33,7 +33,7 @@ func NewConfig(configFile string) *Config {
 	return &Config{
 		ConfigFile:  configFile,
 		Viper:       viper.New(),
-		HomeDirFunc: os.UserHomeDir,
+		HomeDirFunc: userHomeDir,
 		Stderr:      os.Stderr,
 	}
 }
@@ -64,7 +64,7 @@ func LoadConfig(cfg *Config) error {
 		cfg.Viper = viper.New()
 	}
 	if cfg.HomeDirFunc == nil {
-		cfg.HomeDirFunc = os.UserHomeDir
+		cfg.HomeDirFunc = userHomeDir
 	}
 	if cfg.Stderr == nil {
 		cfg.Stderr = os.Stderr
