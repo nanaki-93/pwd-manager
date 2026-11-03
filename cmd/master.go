@@ -191,7 +191,7 @@ var saveStore = utils.SaveFileErr
 // the legacy key file is removed only afterwards, and on a failed save the new
 // key is dropped from memory so it cannot be used for later saves.
 func rotateMasterKey(password []byte, content model.PwdFile) error {
-	pending, err := prepareKey(password)
+	pending, err := prepareKey(password, true)
 	if err != nil {
 		return err
 	}
@@ -238,7 +238,9 @@ func generateKey(password ...[]byte) error {
 	if len(password) > 0 {
 		pwd = password[0]
 	}
-	pending, err := prepareKey(pwd)
+	// The key must match data already encrypted under the salt file, so it is
+	// derived with the recorded iterations and the salt header is kept.
+	pending, err := prepareKey(pwd, false)
 	if err != nil {
 		return err
 	}
@@ -284,8 +286,11 @@ func (p *pendingKey) persistSalt() error {
 }
 
 // prepareKey loads or creates the salt and derives the key for pwd without
-// changing any file or the in-memory master key.
-func prepareKey(pwd []byte) (*pendingKey, error) {
+// changing any file or the in-memory master key. With upgrade the key uses
+// keyDerivationIterations and an outdated salt header is marked for rewrite, so
+// it is only for callers that re-encrypt the store; without it the key
+// reproduces the one recorded by an existing salt file, which is left as is.
+func prepareKey(pwd []byte, upgrade bool) (*pendingKey, error) {
 	if err := validateMasterPassword(pwd); err != nil {
 		return nil, err
 	}
@@ -299,12 +304,16 @@ func prepareKey(pwd []byte) (*pendingKey, error) {
 		clear(salt)
 		return nil, err
 	}
-	derivedKey, err := deriveKey(pwd, salt)
+	writeSalt := !loaded
+	if upgrade && iterations != keyDerivationIterations {
+		iterations, writeSalt = keyDerivationIterations, true
+	}
+	derivedKey, err := deriveKey(pwd, salt, iterations)
 	if err != nil {
 		clear(salt)
 		return nil, err
 	}
-	return &pendingKey{salt: salt, key: derivedKey, writeSalt: !loaded || iterations != keyDerivationIterations}, nil
+	return &pendingKey{salt: salt, key: derivedKey, writeSalt: writeSalt}, nil
 }
 
 // loadOrCreateKeySalt fills salt from the salt file, or with random bytes when
@@ -492,14 +501,19 @@ func removeLegacyKeyFile() error {
 	return nil
 }
 
-func deriveKey(password, salt []byte) ([]byte, error) {
+// deriveKey derives the encryption key for password and salt with PBKDF2 at
+// the given iteration count.
+func deriveKey(password, salt []byte, iterations int) ([]byte, error) {
 	if err := validateMasterPassword(password); err != nil {
 		return nil, err
 	}
 	if len(salt) == 0 {
 		return nil, errors.New("key derivation salt cannot be empty")
 	}
-	return pbkdf2.Key(password, salt, keyDerivationIterations, encryptionKeyLen, sha256.New), nil
+	if iterations < legacyKeyDerivationIterations || iterations > maxKeyDerivationIterations {
+		return nil, fmt.Errorf("unsupported PBKDF2 iteration count %d", iterations)
+	}
+	return pbkdf2.Key(password, salt, iterations, encryptionKeyLen, sha256.New), nil
 }
 
 func init() {
