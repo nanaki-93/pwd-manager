@@ -5,7 +5,6 @@ package cmd
 
 import (
 	"bytes"
-	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/binary"
@@ -14,17 +13,27 @@ import (
 	"github.com/nanaki-93/pwd-manager/internal/model"
 	"github.com/nanaki-93/pwd-manager/internal/utils"
 	"github.com/spf13/cobra"
+	"golang.org/x/crypto/pbkdf2"
 	"io"
 	"os"
 	"strings"
 )
 
 const (
-	minMasterPasswordLen    = 8
-	encryptionKeyLen        = 32
-	keyDerivationSaltLen    = 32
-	keyDerivationIterations = 100_000
-	keyDerivationSaltFile   = ".pwd-salt"
+	minMasterPasswordLen = 8
+	encryptionKeyLen     = 32
+	keyDerivationSaltLen = 32
+	// keyDerivationIterations is the PBKDF2-HMAC-SHA256 work factor (OWASP guidance).
+	// It is recorded in the salt file header so it can be raised later.
+	keyDerivationIterations = 600_000
+	// legacyKeyDerivationIterations is the work factor implied by salt files
+	// written before parameters were recorded (raw salt bytes only).
+	legacyKeyDerivationIterations = 100_000
+	maxKeyDerivationIterations    = 10_000_000
+	keyDerivationSaltFile         = ".pwd-salt"
+	// keySaltMagic starts a salt file of the form magic | uint32 BE iterations | salt.
+	keySaltMagic     = "PWS1"
+	keySaltHeaderLen = len(keySaltMagic) + 4
 )
 
 var randRead = io.ReadFull
@@ -131,7 +140,7 @@ func generateKey(password ...[]byte) error {
 	salt := make([]byte, keyDerivationSaltLen)
 	defer clear(salt)
 
-	loaded, err := loadOrCreateKeySalt(salt)
+	iterations, loaded, err := loadOrCreateKeySalt(salt)
 	if err != nil {
 		return err
 	}
@@ -145,7 +154,9 @@ func generateKey(password ...[]byte) error {
 	if err := removeLegacyKeyFile(); err != nil {
 		return err
 	}
-	if !loaded {
+	// New salts and salt files with outdated parameters are (re)written with
+	// the current KDF parameters; the new key is used for all later saves.
+	if !loaded || iterations != keyDerivationIterations {
 		if err := writeKeySalt(salt); err != nil {
 			return err
 		}
@@ -154,38 +165,57 @@ func generateKey(password ...[]byte) error {
 	return nil
 }
 
-func loadOrCreateKeySalt(salt []byte) (bool, error) {
-	loaded, err := readKeySalt(salt)
+// loadOrCreateKeySalt fills salt from the salt file, or with random bytes when
+// there is none, and returns the PBKDF2 iterations recorded with a loaded salt.
+func loadOrCreateKeySalt(salt []byte) (int, bool, error) {
+	iterations, loaded, err := readKeySalt(salt)
 	if err != nil || loaded {
-		return loaded, err
+		return iterations, loaded, err
 	}
 	if _, err := randRead(rand.Reader, salt); err != nil {
-		return false, fmt.Errorf("read random key bytes: %w", err)
+		return 0, false, fmt.Errorf("read random key bytes: %w", err)
 	}
-	return false, nil
+	return keyDerivationIterations, false, nil
 }
 
-func readKeySalt(salt []byte) (bool, error) {
+// readKeySalt loads the salt file into salt and returns its recorded PBKDF2
+// iterations. Legacy files holding only the raw salt imply legacyKeyDerivationIterations.
+func readKeySalt(salt []byte) (int, bool, error) {
 	info, err := os.Lstat(keyDerivationSaltFile)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			return false, nil
+			return 0, false, nil
 		}
-		return false, fmt.Errorf("stat salt file: %w", err)
+		return 0, false, fmt.Errorf("stat salt file: %w", err)
 	}
 	if !info.Mode().IsRegular() {
-		return false, &os.PathError{Op: "open", Path: keyDerivationSaltFile, Err: errors.New("not a regular file")}
+		return 0, false, &os.PathError{Op: "open", Path: keyDerivationSaltFile, Err: errors.New("not a regular file")}
 	}
 	data, err := os.ReadFile(keyDerivationSaltFile)
 	if err != nil {
-		return false, fmt.Errorf("read salt file: %w", err)
+		return 0, false, fmt.Errorf("read salt file: %w", err)
 	}
 	defer clear(data)
-	if len(data) != len(salt) {
-		return false, fmt.Errorf("invalid salt file length: got %d, want %d", len(data), len(salt))
+	iterations, raw, err := parseKeySalt(data, len(salt))
+	if err != nil {
+		return 0, false, err
 	}
-	copy(salt, data)
-	return true, nil
+	copy(salt, raw)
+	return iterations, true, nil
+}
+
+func parseKeySalt(data []byte, saltLen int) (int, []byte, error) {
+	if len(data) == saltLen {
+		return legacyKeyDerivationIterations, data, nil
+	}
+	if len(data) != keySaltHeaderLen+saltLen || !bytes.HasPrefix(data, []byte(keySaltMagic)) {
+		return 0, nil, fmt.Errorf("invalid salt file length: got %d, want %d", len(data), keySaltHeaderLen+saltLen)
+	}
+	iter := uint64(binary.BigEndian.Uint32(data[len(keySaltMagic):keySaltHeaderLen]))
+	if iter < legacyKeyDerivationIterations || iter > maxKeyDerivationIterations {
+		return 0, nil, fmt.Errorf("unsupported PBKDF2 iteration count %d in salt file", iter)
+	}
+	return int(iter), data[keySaltHeaderLen:], nil
 }
 
 func writeKeySalt(salt []byte) error {
@@ -199,7 +229,12 @@ func writeKeySalt(salt []byte) error {
 	if err == nil && !info.Mode().IsRegular() {
 		return &os.PathError{Op: "write", Path: keyDerivationSaltFile, Err: errors.New("not a regular file")}
 	}
-	if err := os.WriteFile(keyDerivationSaltFile, salt, 0o600); err != nil {
+	data := make([]byte, 0, keySaltHeaderLen+len(salt))
+	data = append(data, keySaltMagic...)
+	data = binary.BigEndian.AppendUint32(data, uint32(keyDerivationIterations))
+	data = append(data, salt...)
+	defer clear(data)
+	if err := os.WriteFile(keyDerivationSaltFile, data, 0o600); err != nil {
 		return fmt.Errorf("write salt file: %w", err)
 	}
 	return nil
@@ -229,44 +264,7 @@ func deriveKey(password, salt []byte) ([]byte, error) {
 	if len(salt) == 0 {
 		return nil, errors.New("key derivation salt cannot be empty")
 	}
-	return pbkdf2SHA256(password, salt, keyDerivationIterations, encryptionKeyLen), nil
-}
-
-func pbkdf2SHA256(password, salt []byte, iterations, keyLen int) []byte {
-	prf := hmac.New(sha256.New, password)
-	hashLen := prf.Size()
-	numBlocks := (keyLen + hashLen - 1) / hashLen
-	var blockBuf [4]byte
-	dk := make([]byte, 0, numBlocks*hashLen)
-	u := make([]byte, hashLen)
-	t := make([]byte, hashLen)
-	defer func() {
-		clear(u)
-		clear(t)
-	}()
-
-	for block := 1; block <= numBlocks; block++ {
-		prf.Reset()
-		prf.Write(salt)
-		binary.BigEndian.PutUint32(blockBuf[:], uint32(block))
-		prf.Write(blockBuf[:])
-		u = prf.Sum(u[:0])
-		copy(t, u)
-
-		for i := 2; i <= iterations; i++ {
-			prf.Reset()
-			prf.Write(u)
-			u = prf.Sum(u[:0])
-			for j := range t {
-				t[j] ^= u[j]
-			}
-		}
-		dk = append(dk, t...)
-	}
-	result := make([]byte, keyLen)
-	copy(result, dk[:keyLen])
-	clear(dk)
-	return result
+	return pbkdf2.Key(password, salt, keyDerivationIterations, encryptionKeyLen, sha256.New), nil
 }
 
 func init() {

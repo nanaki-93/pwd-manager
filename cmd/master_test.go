@@ -278,8 +278,9 @@ func TestGenerateKeyPersistsAndReusesSaltAcrossInvocations(t *testing.T) {
 		t.Fatalf("expected 1 randRead call on initial salt generation, got %d", randCalls)
 	}
 	saltPath := filepath.Join(tmpHome, keyDerivationSaltFile)
-	if persistedSalt, err := os.ReadFile(saltPath); err != nil || !bytes.Equal(persistedSalt, initialSalt) {
-		t.Fatalf("persisted salt = %x (err=%v), want %x", persistedSalt, err, initialSalt)
+	persisted, err := os.ReadFile(saltPath)
+	if _, persistedSalt, perr := parseKeySalt(persisted, keyDerivationSaltLen); err != nil || perr != nil || !bytes.Equal(persistedSalt, initialSalt) {
+		t.Fatalf("persisted salt = %x (err=%v, parse err=%v), want %x", persistedSalt, err, perr, initialSalt)
 	}
 
 	hashed, err := utils.HashMasterPassword(password)
