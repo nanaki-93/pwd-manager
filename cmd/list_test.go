@@ -4,10 +4,28 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"strings"
 	"testing"
+
+	"github.com/spf13/cobra"
 )
+
+// resetFlagToDefault restores a flag registered on cmd to its default value
+// and clears pflag's Changed marker, so tests that parse flags on the shared
+// command do not leak state into later tests.
+func resetFlagToDefault(cmd *cobra.Command, name string) error {
+	f := cmd.Flags().Lookup(name)
+	if f == nil {
+		return fmt.Errorf("reset flag %q on %q: flag not registered", name, cmd.Name())
+	}
+	if err := f.Value.Set(f.DefValue); err != nil {
+		return fmt.Errorf("reset flag %q on %q to %q: %w", name, cmd.Name(), f.DefValue, err)
+	}
+	f.Changed = false
+	return nil
+}
 
 type errWriter struct {
 	err error
@@ -234,7 +252,9 @@ func TestListCmd_ShowFlagRegistered(t *testing.T) {
 func TestListCmd_ShowFlagParsing(t *testing.T) {
 	orig := listShowFlag
 	t.Cleanup(func() {
-		_ = listCmd.Flags().Set("show", "false")
+		if err := resetFlagToDefault(listCmd, "show"); err != nil {
+			t.Errorf("cleanup: %v", err)
+		}
 		listShowFlag = orig
 	})
 
@@ -269,7 +289,9 @@ func TestListCmd_JSONFlagRegistered(t *testing.T) {
 func TestListCmd_JSONFlagParsing(t *testing.T) {
 	orig := listJSONFlag
 	t.Cleanup(func() {
-		_ = listCmd.Flags().Set("json", "false")
+		if err := resetFlagToDefault(listCmd, "json"); err != nil {
+			t.Errorf("cleanup: %v", err)
+		}
 		listJSONFlag = orig
 	})
 
@@ -285,6 +307,34 @@ func TestListCmd_JSONFlagParsing(t *testing.T) {
 	}
 	if listJSONFlag {
 		t.Fatal("expected listJSONFlag to be false after parsing --json=false")
+	}
+}
+
+func TestResetFlagToDefault_RestoresValueAndChanged(t *testing.T) {
+	orig := listJSONFlag
+	t.Cleanup(func() { listJSONFlag = orig })
+
+	if err := listCmd.ParseFlags([]string{"--json"}); err != nil {
+		t.Fatalf("unexpected error parsing --json: %v", err)
+	}
+	if err := resetFlagToDefault(listCmd, "json"); err != nil {
+		t.Fatalf("unexpected reset error: %v", err)
+	}
+	if listJSONFlag {
+		t.Fatal("expected listJSONFlag to be false after reset")
+	}
+	if listCmd.Flags().Changed("json") {
+		t.Fatal("expected Changed marker for --json to be cleared after reset")
+	}
+}
+
+func TestResetFlagToDefault_ReportsUnknownFlag(t *testing.T) {
+	err := resetFlagToDefault(listCmd, "no-such-flag")
+	if err == nil {
+		t.Fatal("expected error when resetting an unregistered flag")
+	}
+	if !strings.Contains(err.Error(), "no-such-flag") {
+		t.Fatalf("expected error to name the flag, got %v", err)
 	}
 }
 
