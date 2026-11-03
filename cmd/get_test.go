@@ -18,18 +18,28 @@ func captureStdout(t *testing.T, fn func()) string {
 	}
 	os.Stdout = w
 	t.Cleanup(func() { _ = r.Close() })
+
+	// Drain the pipe concurrently so output larger than the OS pipe buffer
+	// cannot block fn forever.
+	var buf bytes.Buffer
+	drained := make(chan struct{})
+	go func() {
+		defer close(drained)
+		_, _ = io.Copy(&buf, r)
+	}()
 	defer func() {
 		// Close is idempotent here: a second call only returns an ignored error.
+		// Closing the writer ends the drain, so it never outlives the capture.
 		_ = w.Close()
 		os.Stdout = oldStdout
+		<-drained
 	}()
 
 	fn()
 
 	_ = w.Close()
-	var buf bytes.Buffer
-	_, _ = io.Copy(&buf, r)
-	_ = r.Close()
+	os.Stdout = oldStdout
+	<-drained
 	return buf.String()
 }
 

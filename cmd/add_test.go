@@ -2,13 +2,13 @@ package cmd
 
 import (
 	"bufio"
-	"bytes"
 	"errors"
 	"io"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/nanaki-93/pwd-manager/internal/model"
 	"github.com/nanaki-93/pwd-manager/internal/utils"
@@ -361,6 +361,27 @@ func TestCaptureStdoutRestoresStdoutOnPanic(t *testing.T) {
 	}
 }
 
+func TestCaptureStdoutDrainsOutputLargerThanPipeBuffer(t *testing.T) {
+	// 256 KiB exceeds common OS pipe buffers (~64 KiB); an undrained capture
+	// would block the writer forever.
+	payload := strings.Repeat("x", 256*1024)
+	done := make(chan string, 1)
+	go func() {
+		done <- captureStdout(t, func() {
+			_, _ = io.WriteString(os.Stdout, payload)
+		})
+	}()
+
+	select {
+	case got := <-done:
+		if got != payload {
+			t.Fatalf("expected %d captured bytes, got %d", len(payload), len(got))
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("captureStdout blocked on output larger than the pipe buffer")
+	}
+}
+
 func TestSavePasswordWhenMasterPasswordEmpty(t *testing.T) {
 	origWd, err := os.Getwd()
 	if err != nil {
@@ -374,24 +395,10 @@ func TestSavePasswordWhenMasterPasswordEmpty(t *testing.T) {
 	t.Setenv("HOME", tmpHome)
 	stubPasswordSequence(t, "valid-master-password")
 
-	oldStdout := os.Stdout
-	r, w, err := os.Pipe()
-	if err != nil {
-		t.Fatalf("failed to create pipe: %v", err)
-	}
-	os.Stdout = w
-
-	generateKey()
-	savePassword(model.PwdFile{MasterPassword: ""})
-
-	_ = w.Close()
-	os.Stdout = oldStdout
-
-	var buf bytes.Buffer
-	_, _ = io.Copy(&buf, r)
-	_ = r.Close()
-
-	output := buf.String()
+	output := captureStdout(t, func() {
+		generateKey()
+		savePassword(model.PwdFile{MasterPassword: ""})
+	})
 	if strings.Contains(output, "Enter your current password:") {
 		t.Fatalf("did not expect current password prompt when MasterPassword is empty, got %q", output)
 	}
