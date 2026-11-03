@@ -418,9 +418,9 @@ func TestStorePasswordReportsSaveFailure(t *testing.T) {
 	t.Cleanup(func() { saveVault = orig })
 
 	var gotIn error
-	var saved model.PwdFile
+	var savedValue string
 	saveVault = func(p model.PwdFile, in error) error {
-		gotIn, saved = in, p
+		gotIn, savedValue = in, p.SavedPasswords["github"]
 		return saveErr
 	}
 
@@ -434,8 +434,8 @@ func TestStorePasswordReportsSaveFailure(t *testing.T) {
 	if gotIn != nil {
 		t.Fatalf("expected no stale error passed to save, got %v", gotIn)
 	}
-	if saved.SavedPasswords["github"] != "secret" {
-		t.Fatalf("expected password to be stored before save, got %v", saved.SavedPasswords)
+	if savedValue != "secret" {
+		t.Fatalf("expected password to be stored before save, got %q", savedValue)
 	}
 
 	saveVault = func(model.PwdFile, error) error { return nil }

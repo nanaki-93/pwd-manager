@@ -97,7 +97,7 @@ var errEmptyPassword = errors.New("password value cannot be empty")
 // storePassword records pwdValue under pwdName and persists the vault,
 // returning any save failure with context instead of relying on a stale error.
 // An empty pwdValue is rejected before the vault is touched so it can never
-// overwrite an existing entry.
+// overwrite an existing entry. If the save fails, the caller's map is restored.
 func storePassword(pwdObj model.PwdFile, pwdName, pwdValue string) error {
 	if pwdValue == "" {
 		return fmt.Errorf("save password %q: %w", pwdName, errEmptyPassword)
@@ -105,8 +105,16 @@ func storePassword(pwdObj model.PwdFile, pwdName, pwdValue string) error {
 	if pwdObj.SavedPasswords == nil {
 		pwdObj.SavedPasswords = make(map[string]string)
 	}
+	// SavedPasswords is shared with the caller, so undo the change if the save
+	// fails to keep the in-memory vault in sync with what was persisted.
+	prev, existed := pwdObj.SavedPasswords[pwdName]
 	pwdObj.SavedPasswords[pwdName] = pwdValue
 	if err := saveVault(pwdObj, nil); err != nil {
+		if existed {
+			pwdObj.SavedPasswords[pwdName] = prev
+		} else {
+			delete(pwdObj.SavedPasswords, pwdName)
+		}
 		return fmt.Errorf("save password %q: %w", pwdName, err)
 	}
 	return nil
