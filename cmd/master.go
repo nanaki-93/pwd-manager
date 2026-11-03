@@ -78,6 +78,10 @@ func execMasterCmd(cmd *cobra.Command, args []string) {
 		fmt.Println("You don't have a master password yet.")
 		isToInit = true
 	}
+	if err := requireMasterHash(currPwdContent, !isToInit); err != nil {
+		utils.ManageErrorAndExit(err)
+		return
+	}
 	if !isToInit {
 		fmt.Println("Do you want to update your master password? (y/n)")
 		answer, err := readConfirmation(os.Stdin)
@@ -93,6 +97,23 @@ func execMasterCmd(cmd *cobra.Command, args []string) {
 		savePassword(currPwdContent)
 	}
 
+}
+
+// errMissingMasterHash reports an existing store without a master password
+// hash; rotating its key would skip verification of the current password.
+var errMissingMasterHash = errors.New("password store exists but has no master password hash; refusing to change the master password")
+
+// requireMasterHash fails when content comes from an existing store, or holds
+// saved passwords, but has no master hash to verify the current password against.
+// A non-empty but malformed hash never verifies, so it is refused by savePassword.
+func requireMasterHash(content model.PwdFile, storeExists bool) error {
+	if content.MasterPassword != "" {
+		return nil
+	}
+	if storeExists || len(content.SavedPasswords) > 0 {
+		return errMissingMasterHash
+	}
+	return nil
 }
 
 // readConfirmation reads one answer line from r a byte at a time, so input meant
@@ -125,6 +146,10 @@ func savePassword(currPwdContent model.PwdFile) {
 		clear(currPassword)
 		clear(newPassword)
 	}()
+	if err := requireMasterHash(currPwdContent, false); err != nil {
+		utils.ManageErrorAndExit(err)
+		return
+	}
 	if currPwdContent.MasterPassword != "" {
 		currPassword = utils.PromptPassword("Enter your current password:")
 		matched := utils.VerifyMasterPassword(currPwdContent.MasterPassword, currPassword)
