@@ -84,6 +84,9 @@ func escapeListKey(k string) string {
 // invalid UTF-8 bytes so stored names and values cannot inject terminal escape
 // sequences. Printable text is returned unchanged.
 func sanitizeForTerminal(s string) string {
+	if isPrintableASCII(s) {
+		return s
+	}
 	var b strings.Builder
 	b.Grow(len(s))
 	for i := 0; i < len(s); {
@@ -100,6 +103,17 @@ func sanitizeForTerminal(s string) string {
 		i += size
 	}
 	return b.String()
+}
+
+// isPrintableASCII reports whether every byte of s is in 0x20..0x7E, so
+// sanitizeForTerminal can return s without allocating.
+func isPrintableASCII(s string) bool {
+	for i := 0; i < len(s); i++ {
+		if s[i] < 0x20 || s[i] > 0x7e {
+			return false
+		}
+	}
+	return true
 }
 
 // writeListJSONOutput streams the vault as an indented JSON object, one entry
