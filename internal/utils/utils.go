@@ -206,10 +206,11 @@ func VerifyMasterPassword(stored string, candidate []byte) bool {
 	return subtle.ConstantTimeCompare(expectedDK, actualDK) == 1
 }
 
-// hashNeedsUpgrade reports whether stored was written with other than the current KDF parameters.
+// hashNeedsUpgrade reports whether stored was written with a weaker work factor
+// than pbkdf2Iter; higher iteration counts are kept as they are.
 func hashNeedsUpgrade(stored string) bool {
 	iter, _, _, ok := parsePBKDF2Hash(stored)
-	return ok && iter != pbkdf2Iter
+	return ok && iter < pbkdf2Iter
 }
 
 func parsePBKDF2Hash(stored string) (int, []byte, []byte, bool) {
@@ -595,10 +596,11 @@ func getPwdObjWithIter() (model.PwdFile, int, error) {
 }
 
 // upgradeKDFIfNeeded re-hashes the master password and re-encrypts the store with
-// the current KDF parameters after a successful unlock with older ones.
+// the current KDF parameters after a successful unlock with weaker ones. Stores
+// and hashes already at or above pbkdf2Iter are left untouched.
 func upgradeKDFIfNeeded(pwdObj *model.PwdFile, password []byte, storeIter int) error {
 	rehash := hashNeedsUpgrade(pwdObj.MasterPassword)
-	if !rehash && storeIter == pbkdf2Iter {
+	if !rehash && storeIter >= pbkdf2Iter {
 		return nil
 	}
 	upgraded := *pwdObj
