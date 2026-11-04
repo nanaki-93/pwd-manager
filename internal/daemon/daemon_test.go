@@ -608,16 +608,16 @@ func TestCopyPasswordToClipboard_StaleTimerInvalidatedOnSubsequentWriteError(t *
 
 	var scheduledFn func()
 	afterFunc = func(d time.Duration, f func()) *time.Timer {
-		scheduledFn = f
+		if scheduledFn == nil { // keep the stale first-copy timer, not the clear retry
+			scheduledFn = f
+		}
 		tm := time.NewTimer(time.Hour)
 		tm.Stop()
 		return tm
 	}
-
 	if err := copyPasswordToClipboard("same-secret"); err != nil {
 		t.Fatalf("unexpected error on first copy: %v", err)
 	}
-
 	failWrite = true
 	if err := copyPasswordToClipboard("same-secret"); err == nil {
 		t.Fatal("expected write error on second copy")
