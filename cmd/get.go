@@ -22,6 +22,12 @@ var getClearAfterFlag = addClipboardClearDelay
 // errInvalidClearAfter reports a non-positive --clear-after value.
 var errInvalidClearAfter = errors.New("--clear-after must be a positive duration")
 
+// errEmptyPasswordStore reports a lookup against a store with no passwords.
+var errEmptyPasswordStore = errors.New("the password store is empty")
+
+// errPasswordNotFound reports a lookup for a name that is not saved.
+var errPasswordNotFound = errors.New("password not found")
+
 // getCmd represents the get command
 var getCmd = &cobra.Command{
 	Use:   "get",
@@ -52,13 +58,11 @@ func copyPasswordToClipboard(password string) error {
 
 func handleGetOutput(name string, savedPasswords map[string]string, copyToClipboard bool) error {
 	if len(savedPasswords) == 0 {
-		fmt.Printf("No passwords saved with name '%s': the password store is empty. Add one with 'pwd-manager add'.\n", name)
-		return nil
+		return fmt.Errorf("get password '%s': %w; add one with 'pwd-manager add'", name, errEmptyPasswordStore)
 	}
 	pwd, ok := savedPasswords[name]
 	if !ok {
-		fmt.Printf("Password with key '%s' not found", name)
-		return nil
+		return fmt.Errorf("get password '%s': %w", name, errPasswordNotFound)
 	}
 	if copyToClipboard {
 		return copyAndClearPassword(pwd, getClearAfterFlag)

@@ -212,43 +212,35 @@ func TestHandleGetOutputEmptyAndMissingKeys(t *testing.T) {
 	}
 
 	var gotErr error
-	outEmpty := captureStdout(t, func() {
-		gotErr = handleGetOutput("github", map[string]string{}, true)
-	})
-	if gotErr != nil {
-		t.Fatalf("expected nil error for empty savedPasswords, got %v", gotErr)
-	}
-	if called {
-		t.Fatalf("expected clipboard not to be called when savedPasswords is empty")
-	}
-	if !strings.Contains(outEmpty, "No passwords saved with ") {
-		t.Fatalf("expected empty passwords message, got %q", outEmpty)
-	}
-
-	outNil := captureStdout(t, func() {
-		gotErr = handleGetOutput("github", nil, true)
-	})
-	if gotErr != nil {
-		t.Fatalf("expected nil error for nil savedPasswords, got %v", gotErr)
-	}
-	if called {
-		t.Fatalf("expected clipboard not to be called when savedPasswords is nil")
-	}
-	if !strings.Contains(outNil, "No passwords saved with ") {
-		t.Fatalf("expected empty passwords message for nil map, got %q", outNil)
+	for _, saved := range []map[string]string{{}, nil} {
+		out := captureStdout(t, func() {
+			gotErr = handleGetOutput("github", saved, true)
+		})
+		if !errors.Is(gotErr, errEmptyPasswordStore) || !strings.Contains(gotErr.Error(), "github") {
+			t.Fatalf("expected empty-store error naming 'github', got %v", gotErr)
+		}
+		if called {
+			t.Fatalf("expected clipboard not to be called when savedPasswords is empty")
+		}
+		if out != "" {
+			t.Fatalf("expected no stdout output (the caller reports the error), got %q", out)
+		}
 	}
 
 	outMissing := captureStdout(t, func() {
 		gotErr = handleGetOutput("gitlab", map[string]string{"github": "s3cr3t"}, true)
 	})
-	if gotErr != nil {
-		t.Fatalf("expected nil error for missing key, got %v", gotErr)
+	if !errors.Is(gotErr, errPasswordNotFound) || !strings.Contains(gotErr.Error(), "gitlab") {
+		t.Fatalf("expected not-found error naming 'gitlab', got %v", gotErr)
+	}
+	if strings.Contains(gotErr.Error(), "s3cr3t") {
+		t.Fatalf("expected error not to leak saved secrets, got %v", gotErr)
 	}
 	if called {
 		t.Fatalf("expected clipboard not to be called when key is missing")
 	}
-	if outMissing != "Password with key 'gitlab' not found" {
-		t.Fatalf("expected not found message, got %q", outMissing)
+	if outMissing != "" {
+		t.Fatalf("expected no stdout output for missing key, got %q", outMissing)
 	}
 }
 
