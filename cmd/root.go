@@ -17,6 +17,9 @@ import (
 var cfgFile string
 var nameFlag string
 
+// envPrefix namespaces environment overrides of config keys (PWD_MANAGER_<KEY>).
+const envPrefix = "PWD_MANAGER"
+
 type configContextKey struct{}
 
 // Config holds explicit command configuration without relying on package-level singletons.
@@ -86,6 +89,9 @@ func LoadConfig(cfg *Config) error {
 		cfg.Viper.SetConfigName(".pwd-manager")
 	}
 
+	// Only PWD_MANAGER_-prefixed variables may override config keys, so
+	// unrelated environment variables cannot silently redirect settings.
+	cfg.Viper.SetEnvPrefix(envPrefix)
 	cfg.Viper.AutomaticEnv()
 
 	if err := cfg.Viper.ReadInConfig(); err != nil {
