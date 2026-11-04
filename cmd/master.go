@@ -139,6 +139,10 @@ func readConfirmation(r io.Reader) (string, error) {
 	}
 }
 
+// errCurrentPasswordMismatch reports a wrong current master password; it ends
+// the command with a non-zero exit status so scripts can detect the failure.
+var errCurrentPasswordMismatch = errors.New("Passwords do not match")
+
 func savePassword(currPwdContent model.PwdFile) {
 	var currPassword []byte
 	var newPassword []byte
@@ -155,7 +159,7 @@ func savePassword(currPwdContent model.PwdFile) {
 		matched := utils.VerifyMasterPassword(currPwdContent.MasterPassword, currPassword)
 		clear(currPassword)
 		if !matched {
-			fmt.Println("Passwords do not match")
+			utils.ManageErrorAndExit(errCurrentPasswordMismatch)
 			return
 		}
 	}
