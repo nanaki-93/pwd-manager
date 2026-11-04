@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"errors"
+	"strings"
 	"testing"
 )
 
@@ -151,6 +152,7 @@ func TestClearWriteGiveUpDropsStalePasswords(t *testing.T) {
 func TestFailedCopyReadFailureDropsStalePasswords(t *testing.T) {
 	resetClipboardTestState(t)
 	newConcurrentClipboardHarness()
+	clipboardClearRetryDelays = nil
 	if err := copyPasswordToClipboard("old"); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -158,6 +160,67 @@ func TestFailedCopyReadFailureDropsStalePasswords(t *testing.T) {
 	readClipboard = func() (string, error) { return "", errors.New("clipboard busy") }
 	if err := copyPasswordToClipboard("new"); err == nil {
 		t.Fatal("expected write error")
+	}
+	requireNoStalePwds(t)
+}
+
+// failCopyWithBusyRead copies "old", then fails copying "new" while the
+// clipboard cannot be read, and restores reads afterwards.
+func failCopyWithBusyRead(t *testing.T, h *concurrentClipboardHarness) {
+	t.Helper()
+	if err := copyPasswordToClipboard("old"); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	writeClipboard = func(text string) error {
+		if text == "new" {
+			return errors.New("clipboard unavailable")
+		}
+		return h.write(text)
+	}
+	readClipboard = func() (string, error) { return "", errors.New("clipboard busy") }
+	if err := copyPasswordToClipboard("new"); err == nil {
+		t.Fatal("expected write error")
+	}
+}
+
+func TestClearAfterFailedWriteRetriesFailedRead(t *testing.T) {
+	resetClipboardTestState(t)
+	h := newConcurrentClipboardHarness()
+	failCopyWithBusyRead(t, h)
+	readClipboard = h.read
+	runOnlyCallback(t, h, 2)
+	if got, _ := h.read(); got != "" {
+		t.Fatalf("expected retry to clear old password, got %q", got)
+	}
+}
+
+func TestClearAfterFailedWriteReadRetrySkipsNewerCopy(t *testing.T) {
+	resetClipboardTestState(t)
+	h := newConcurrentClipboardHarness()
+	failCopyWithBusyRead(t, h)
+	readClipboard = h.read
+	if err := copyPasswordToClipboard("newer"); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	h.mu.Lock()
+	retry := h.callbacks[1]
+	h.mu.Unlock()
+	retry()
+	if got, _ := h.read(); got != "newer" {
+		t.Fatalf("stale retry erased newer copy: %q", got)
+	}
+}
+
+func TestClearAfterFailedWriteReadRetriesReportGiveUp(t *testing.T) {
+	resetClipboardTestState(t)
+	h := newConcurrentClipboardHarness()
+	clipboardClearRetryDelays = clipboardClearRetryDelays[:1]
+	var reported []error
+	reportClipboardClearFailure = func(err error) { reported = append(reported, err) }
+	failCopyWithBusyRead(t, h)
+	runOnlyCallback(t, h, 2)
+	if len(reported) != 1 || !strings.Contains(reported[0].Error(), "giving up") {
+		t.Fatalf("expected one give-up report, got %v", reported)
 	}
 	requireNoStalePwds(t)
 }

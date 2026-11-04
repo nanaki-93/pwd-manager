@@ -261,8 +261,7 @@ func clearAfterFailedWrite(token uint64, writeErr error) error {
 
 	current, err := readFn()
 	if err != nil {
-		dropStalePwds(token)
-		return errors.Join(writeErr, fmt.Errorf("read clipboard to clear previous password: %w; it may still be on the clipboard", err))
+		return errors.Join(writeErr, scheduleFailedWriteReadRetry(token, targets[len(targets)-1], err))
 	}
 	if !clipboardHoldsAny(current, targets) {
 		dropStalePwds(token)
@@ -272,6 +271,30 @@ func clearAfterFailedWrite(token uint64, writeErr error) error {
 		return errors.Join(writeErr, fmt.Errorf("clear previous password from clipboard: %w; it may still be on the clipboard", err))
 	}
 	return writeErr
+}
+
+// scheduleFailedWriteReadRetry handles a failed read in clearAfterFailedWrite:
+// while retries remain it restores ownership for pwd and schedules a verified
+// clear after clipboardClearRetryDelays[0], whose later failures are retried
+// and finally reported by clearClipboardAttempt. A newer copy that started
+// meanwhile owns the stale passwords, so nothing is scheduled then.
+func scheduleFailedWriteReadRetry(token uint64, pwd string, readErr error) error {
+	clipboardMu.Lock()
+	defer clipboardMu.Unlock()
+	if clipboardToken != token || clipboardOwned {
+		return fmt.Errorf("read clipboard to clear previous password: %w; it may still be on the clipboard", readErr)
+	}
+	if len(clipboardClearRetryDelays) == 0 {
+		// Giving up: drop the plaintext passwords no clear will use any more.
+		clipboardStalePwds = nil
+		return fmt.Errorf("read clipboard to clear previous password (attempt 1, giving up): %w; it may still be on the clipboard", readErr)
+	}
+	delay := clipboardClearRetryDelays[0]
+	clipboardOwned, clipboardActivePwd = true, pwd
+	clipboardTimer = afterFunc(delay, func() {
+		clearClipboardAttempt(token, pwd, 1)
+	})
+	return fmt.Errorf("read clipboard to clear previous password (attempt 1, retrying in %v): %w; it may still be on the clipboard", delay, readErr)
 }
 
 // dropStalePwds forgets the tracked stale passwords once no clear will use
