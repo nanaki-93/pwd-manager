@@ -86,17 +86,17 @@ func TestClearCopiedPasswordAfterClampsDelay(t *testing.T) {
 		{"in range", 30 * time.Second, 30 * time.Second},
 		{"tiny", time.Nanosecond, time.Nanosecond},
 	}
-	orig := clipboardClearWaiter
-	t.Cleanup(func() { clipboardClearWaiter = orig })
+	orig, origRead, origWrite := clipboardClearWaiter, clipboardReadAll, clipboardWriteAll
+	t.Cleanup(func() {
+		clipboardClearWaiter, clipboardReadAll, clipboardWriteAll = orig, origRead, origWrite
+	})
+	clipboardReadAll = func() (string, error) { return "s3cr3t", nil }
+	clipboardWriteAll = func(string) error { return nil }
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			var got time.Duration
-			clipboardClearWaiter = func(_ context.Context, pwd string, delay time.Duration) error {
-				if pwd != "s3cr3t" {
-					t.Errorf("waiter got pwd %q", pwd)
-				}
+			clipboardClearWaiter = func(_ context.Context, delay time.Duration) {
 				got = delay
-				return nil
 			}
 			if err := clearCopiedPasswordAfter("s3cr3t", tt.delay); err != nil {
 				t.Fatalf("unexpected error: %v", err)
@@ -105,5 +105,38 @@ func TestClearCopiedPasswordAfterClampsDelay(t *testing.T) {
 				t.Fatalf("delay %v: waited %v, want %v", tt.delay, got, tt.want)
 			}
 		})
+	}
+}
+
+// TestClearCopiedPasswordAfterStopsSignalCaptureBeforeClipboardIO checks
+// that signal capture has ended by the time the clipboard is read and
+// written, so a second SIGINT/SIGTERM during clipboard I/O gets the default
+// handling instead of being swallowed, and that timer expiry still clears.
+func TestClearCopiedPasswordAfterStopsSignalCaptureBeforeClipboardIO(t *testing.T) {
+	origNotify, origRead, origWrite := signalNotifyContext, clipboardReadAll, clipboardWriteAll
+	t.Cleanup(func() {
+		signalNotifyContext, clipboardReadAll, clipboardWriteAll = origNotify, origRead, origWrite
+	})
+	var stopped, readStopped, writeStopped bool
+	signalNotifyContext = func(parent context.Context, sigs ...os.Signal) (context.Context, context.CancelFunc) {
+		ctx, stop := origNotify(parent, sigs...)
+		return ctx, func() { stopped = true; stop() }
+	}
+	clipboardReadAll = func() (string, error) { readStopped = stopped; return "s3cr3t", nil }
+	var writes []string
+	clipboardWriteAll = func(s string) error {
+		writeStopped = stopped
+		writes = append(writes, s)
+		return nil
+	}
+	if err := clearCopiedPasswordAfter("s3cr3t", time.Nanosecond); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !readStopped || !writeStopped {
+		t.Fatalf("signal capture still active during clipboard I/O (read stopped=%v, write stopped=%v)",
+			readStopped, writeStopped)
+	}
+	if len(writes) != 1 || writes[0] != "" {
+		t.Fatalf("expected clipboard cleared after timer expiry, got %q", writes)
 	}
 }
