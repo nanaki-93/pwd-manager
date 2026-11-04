@@ -99,7 +99,11 @@ func LoadConfig(cfg *Config) error {
 		return fmt.Errorf("read default config: %w", err)
 	}
 
-	cfg.ConfigFileUsed = cfg.Viper.ConfigFileUsed()
+	used := cfg.Viper.ConfigFileUsed()
+	if err := checkConfigFilePermissions(used); err != nil {
+		return fmt.Errorf("verify config file %q: %w", used, err)
+	}
+	cfg.ConfigFileUsed = used
 	if _, err := fmt.Fprintln(cfg.Stderr, "Using config file:", cfg.ConfigFileUsed); err != nil {
 		return fmt.Errorf("write config notice: %w", err)
 	}
