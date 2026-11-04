@@ -8,6 +8,10 @@ import (
 	"fmt"
 	"io"
 	"sort"
+	"strconv"
+	"strings"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/nanaki-93/pwd-manager/internal/utils"
 	"github.com/spf13/cobra"
@@ -46,11 +50,33 @@ func writeListOutput(w io.Writer, savedPasswords map[string]string, showPlaintex
 		if showPlaintext {
 			val = savedPasswords[k]
 		}
-		if _, err := fmt.Fprintf(w, "%s: %s\n", k, val); err != nil {
+		if _, err := fmt.Fprintf(w, "%s: %s\n", sanitizeForTerminal(k), sanitizeForTerminal(val)); err != nil {
 			return fmt.Errorf("write list output: %w", err)
 		}
 	}
 	return nil
+}
+
+// sanitizeForTerminal escapes control characters, non-printable runes and
+// invalid UTF-8 bytes so stored names and values cannot inject terminal escape
+// sequences. Printable text is returned unchanged.
+func sanitizeForTerminal(s string) string {
+	var b strings.Builder
+	b.Grow(len(s))
+	for i := 0; i < len(s); {
+		r, size := utf8.DecodeRuneInString(s[i:])
+		switch {
+		case r == utf8.RuneError && size == 1:
+			fmt.Fprintf(&b, `\x%02x`, s[i])
+		case unicode.IsPrint(r):
+			b.WriteRune(r)
+		default:
+			q := strconv.QuoteRuneToASCII(r)
+			b.WriteString(q[1 : len(q)-1])
+		}
+		i += size
+	}
+	return b.String()
 }
 
 func writeListJSONOutput(w io.Writer, savedPasswords map[string]string, showPlaintext bool) error {

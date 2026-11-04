@@ -8,6 +8,7 @@ import (
 	"io"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/spf13/cobra"
 )
@@ -168,6 +169,32 @@ func TestWriteListOutput_BoundaryValuesAndSorting(t *testing.T) {
 	wantPlain := "a-account: p@ss:w0rd!\nm-account: ********\nz-account: \n"
 	if plainBuf.String() != wantPlain {
 		t.Fatalf("unexpected plaintext output: got %q, want %q", plainBuf.String(), wantPlain)
+	}
+}
+
+func TestWriteListOutput_EscapesControlCharacters(t *testing.T) {
+	saved := map[string]string{
+		"evil\x1b[2J\rname\xe2\x80\xae": "val\x07\x1b]0;pwn\x07\xff",
+	}
+
+	for _, show := range []bool{false, true} {
+		var buf bytes.Buffer
+		if err := writeListOutput(&buf, saved, show); err != nil {
+			t.Fatalf("expected no error, got %v", err)
+		}
+		got := buf.String()
+		body := strings.TrimSuffix(got, "\n")
+		for _, r := range body {
+			if r < 0x20 || r == 0x7f || r == 0x202e || r == utf8.RuneError {
+				t.Fatalf("show=%v: output contains unescaped rune %U: %q", show, r, got)
+			}
+		}
+		if !strings.HasPrefix(got, `evil\x1b[2J\rname`+"\\"+`u202e: `) {
+			t.Fatalf("show=%v: name not escaped as expected: %q", show, got)
+		}
+		if show && !strings.HasSuffix(got, `: val\a\x1b]0;pwn\a\xff`+"\n") {
+			t.Fatalf("value not escaped as expected: %q", got)
+		}
 	}
 }
 
