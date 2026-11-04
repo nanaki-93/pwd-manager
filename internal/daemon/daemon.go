@@ -37,12 +37,11 @@ const DefaultClipboardClearTimeout = 10 * time.Second
 const UnhintedClipboardClearTimeout = 5 * time.Second
 
 var (
-	clipboardClearTimeout  = DefaultClipboardClearTimeout
-	writeClipboard         = clipboard.WriteAll
-	readClipboard          = clipboard.ReadAll
-	afterFunc              = time.AfterFunc
-	clipboardOS            = runtime.GOOS
-	markClipboardConcealed = func(flags []string) {}
+	clipboardClearTimeout = DefaultClipboardClearTimeout
+	writeClipboard        = clipboard.WriteAll
+	readClipboard         = clipboard.ReadAll
+	afterFunc             = time.AfterFunc
+	clipboardOS           = runtime.GOOS
 
 	// clipboardClearRetryDelays bounds the backoff used when reading the
 	// clipboard fails at expiry; its length is the number of retries.
@@ -57,6 +56,12 @@ var (
 	clipboardTimer *time.Timer
 	clipboardToken uint64
 )
+
+// markClipboardConcealed attaches concealment hints to the clipboard entry.
+// writeClipboard only receives the plain string, so no hints are attached by
+// default (nil); copyPasswordToClipboard then treats the platform as unhinted
+// and caps retention at UnhintedClipboardClearTimeout.
+var markClipboardConcealed func(flags []string)
 
 // ConcealedClipboardFlags returns platform-specific clipboard metadata hints
 // used to mark secret entries as concealed and transient where supported.
@@ -134,8 +139,9 @@ func showPasswordsMenu() {
 	}
 }
 
-// copyPasswordToClipboard writes pwd to the system clipboard, records
-// platform-specific concealed/transient metadata hints, and schedules automatic
+// copyPasswordToClipboard writes pwd to the system clipboard, applies
+// platform-specific concealed/transient metadata hints when a hint applier is
+// installed (otherwise the shorter unhinted retention is used), and schedules automatic
 // clearing after clipboardClearTimeout if the clipboard still holds pwd. A
 // non-positive clipboardClearTimeout is reported and replaced by
 // DefaultClipboardClearTimeout, so a copied password is always cleared.
@@ -167,7 +173,12 @@ func copyPasswordToClipboard(pwd string) error {
 	clipboardMu.Unlock()
 
 	flags := ConcealedClipboardFlags(goos)
-	markFn(flags)
+	if markFn == nil {
+		// No hint can be attached, so the entry is effectively unhinted.
+		flags = nil
+	} else {
+		markFn(flags)
+	}
 
 	if timeout <= 0 {
 		// Automatic clearing cannot be disabled: a non-positive timeout is

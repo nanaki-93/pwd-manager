@@ -91,7 +91,7 @@ func TestCopyPasswordToClipboard_ClearsMatchingSecretAfterTimeout(t *testing.T) 
 	var scheduledFn func()
 	var scheduledDuration time.Duration
 	clipboardClearTimeout = 15 * time.Second
-	clipboardOS = "linux"
+	clipboardOS, markClipboardConcealed = "linux", func([]string) {}
 	afterFunc = func(d time.Duration, f func()) *time.Timer {
 		scheduledDuration = d
 		scheduledFn = f
@@ -251,7 +251,7 @@ func TestCopyPasswordToClipboard_UnhintedPlatformsUseShorterRetention(t *testing
 		t.Run(tc.goos+"/"+tc.configured.String(), func(t *testing.T) {
 			resetClipboardTestState(t)
 			writeClipboard = func(string) error { return nil }
-			clipboardOS = tc.goos
+			clipboardOS, markClipboardConcealed = tc.goos, func([]string) {}
 			clipboardClearTimeout = tc.configured
 			var got time.Duration
 			afterFunc = func(d time.Duration, f func()) *time.Timer {
