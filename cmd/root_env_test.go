@@ -28,6 +28,18 @@ func TestLoadConfigIgnoresUnprefixedEnv(t *testing.T) {
 	}
 }
 
+func TestLoadConfigRejectsUnlistedEnvironmentKey(t *testing.T) {
+	t.Setenv("PWD_MANAGER_UNLISTED_REGRESSION_KEY", "unexpected")
+	cfg := NewConfig(writeEnvTestConfig(t))
+	cfg.Stderr = io.Discard
+	if err := LoadConfig(cfg); err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if got := cfg.Viper.GetString("unlisted_regression_key"); got != "" {
+		t.Fatalf("unlisted environment key = %q, want empty (explicit allowlist only)", got)
+	}
+}
+
 func TestLoadConfigHonorsPrefixedEnv(t *testing.T) {
 	t.Setenv("PWD_MANAGER_VAULT", "override")
 	cfg := NewConfig(writeEnvTestConfig(t))
