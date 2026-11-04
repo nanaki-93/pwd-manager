@@ -12,10 +12,9 @@ func TestStorePasswordRollsBackMapOnSaveFailure(t *testing.T) {
 	t.Cleanup(func() { saveVault = orig })
 
 	saveErr := errors.New("disk full")
+	var savedGithub string
 	saveVault = func(p model.PwdFile, _ error) error {
-		if got := p.SavedPasswords["github"]; got != "new-secret" {
-			t.Fatalf("expected new value passed to save, got %q", got)
-		}
+		savedGithub = p.SavedPasswords["github"]
 		return saveErr
 	}
 
@@ -32,10 +31,14 @@ func TestStorePasswordRollsBackMapOnSaveFailure(t *testing.T) {
 				want[k] = v
 			}
 			pwdObj := model.PwdFile{MasterPassword: "hashed-master", SavedPasswords: tc.initial}
+			savedGithub = ""
 
 			err := storePassword(pwdObj, "github", "new-secret")
 			if !errors.Is(err, saveErr) {
 				t.Fatalf("expected wrapped save error, got %v", err)
+			}
+			if savedGithub != "new-secret" {
+				t.Fatalf("expected new value passed to save, got %q", savedGithub)
 			}
 			if len(pwdObj.SavedPasswords) != len(want) {
 				t.Fatalf("expected map %v, got %v", want, pwdObj.SavedPasswords)
