@@ -261,15 +261,29 @@ func clearAfterFailedWrite(token uint64, writeErr error) error {
 
 	current, err := readFn()
 	if err != nil {
+		dropStalePwds(token)
 		return errors.Join(writeErr, fmt.Errorf("read clipboard to clear previous password: %w; it may still be on the clipboard", err))
 	}
 	if !clipboardHoldsAny(current, targets) {
+		dropStalePwds(token)
 		return writeErr
 	}
 	if err := clearVerifiedClipboard(token, targets[len(targets)-1], 0); err != nil {
 		return errors.Join(writeErr, fmt.Errorf("clear previous password from clipboard: %w; it may still be on the clipboard", err))
 	}
 	return writeErr
+}
+
+// dropStalePwds forgets the tracked stale passwords once no clear will use
+// them, so their plaintext does not linger in memory. It does nothing if a
+// newer copy started, since that copy now owns them. An earlier write still in
+// flight re-registers its password when it lands (see adoptStaleLocked).
+func dropStalePwds(token uint64) {
+	clipboardMu.Lock()
+	defer clipboardMu.Unlock()
+	if clipboardToken == token && !clipboardOwned {
+		clipboardStalePwds = nil
+	}
 }
 
 // clearVerifiedClipboard clears the clipboard after the caller verified it
@@ -308,6 +322,8 @@ func scheduleClearRetry(token uint64, pwd string, attempt int, writeErr error) e
 	clipboardMu.Lock()
 	defer clipboardMu.Unlock()
 	if attempt >= len(clipboardClearRetryDelays) {
+		// Giving up: drop the plaintext passwords no clear will use any more.
+		clipboardStalePwds = nil
 		return fmt.Errorf("%w (giving up after %d attempts)", writeErr, attempt+1)
 	}
 	delay := clipboardClearRetryDelays[attempt]
@@ -421,7 +437,8 @@ func handleClearReadFailure(token uint64, pwd string, attempt int, readErr error
 		report(fmt.Errorf("read clipboard before clearing password (attempt %d, retrying in %v): %w", attempt+1, delay, readErr))
 		return
 	}
-	clipboardOwned, clipboardActivePwd = false, ""
+	// Giving up: drop the plaintext passwords no clear will use any more.
+	clipboardOwned, clipboardActivePwd, clipboardStalePwds = false, "", nil
 	clipboardMu.Unlock()
 
 	// The clipboard cannot be verified to still hold the password, so it is

@@ -102,3 +102,62 @@ func TestFailedClearWriteRetriesAreBounded(t *testing.T) {
 		t.Fatalf("expected no retry after the last attempt, got %d callbacks", n)
 	}
 }
+
+func requireNoStalePwds(t *testing.T) {
+	t.Helper()
+	clipboardMu.Lock()
+	n := len(clipboardStalePwds)
+	clipboardMu.Unlock()
+	if n != 0 {
+		t.Fatalf("expected stale passwords to be dropped after giving up, %d retained", n)
+	}
+}
+
+// copyTwice leaves "old" as a tracked stale password behind "new".
+func copyTwice(t *testing.T) {
+	t.Helper()
+	for _, pwd := range []string{"old", "new"} {
+		if err := copyPasswordToClipboard(pwd); err != nil {
+			t.Fatalf("unexpected error copying %q: %v", pwd, err)
+		}
+	}
+}
+
+func TestReadFailureGiveUpDropsStalePasswords(t *testing.T) {
+	resetClipboardTestState(t)
+	h := newConcurrentClipboardHarness()
+	clipboardClearRetryDelays = nil
+	copyTwice(t)
+	readClipboard = func() (string, error) { return "", errors.New("clipboard busy") }
+	runOnlyCallback(t, h, 2)
+	requireNoStalePwds(t)
+}
+
+func TestClearWriteGiveUpDropsStalePasswords(t *testing.T) {
+	resetClipboardTestState(t)
+	h := newConcurrentClipboardHarness()
+	clipboardClearRetryDelays = nil
+	copyTwice(t)
+	writeClipboard = func(text string) error {
+		if text == "" {
+			return errors.New("clipboard busy")
+		}
+		return h.write(text)
+	}
+	runOnlyCallback(t, h, 2)
+	requireNoStalePwds(t)
+}
+
+func TestFailedCopyReadFailureDropsStalePasswords(t *testing.T) {
+	resetClipboardTestState(t)
+	newConcurrentClipboardHarness()
+	if err := copyPasswordToClipboard("old"); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	writeClipboard = func(string) error { return errors.New("clipboard unavailable") }
+	readClipboard = func() (string, error) { return "", errors.New("clipboard busy") }
+	if err := copyPasswordToClipboard("new"); err == nil {
+		t.Fatal("expected write error")
+	}
+	requireNoStalePwds(t)
+}
