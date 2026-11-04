@@ -163,6 +163,9 @@ func copyPasswordToClipboard(pwd string) error {
 	clipboardMu.Lock()
 	clipboardToken++
 	token := clipboardToken
+	// A pending timer means an earlier password may still be on the
+	// clipboard; its clear is cancelled here and must be replaced.
+	hadPendingClear := clipboardTimer != nil || len(clipboardStalePwds) > 0
 	if clipboardTimer != nil {
 		clipboardTimer.Stop()
 		clipboardTimer = nil
@@ -173,7 +176,11 @@ func copyPasswordToClipboard(pwd string) error {
 	clipboardMu.Unlock()
 
 	if err := writeFn(pwd); err != nil {
-		return fmt.Errorf("write password to clipboard: %w", err)
+		werr := fmt.Errorf("write password to clipboard: %w", err)
+		if hadPendingClear {
+			return clearAfterFailedWrite(token, werr)
+		}
+		return werr
 	}
 
 	clipboardMu.Lock()
@@ -219,6 +226,26 @@ func copyPasswordToClipboard(pwd string) error {
 	})
 
 	return nil
+}
+
+// clearAfterFailedWrite runs a best-effort clear after writing a new password
+// failed, because that copy already cancelled the earlier password's pending
+// clear. It skips the clear when a newer copy has started, and joins any clear
+// failure to writeErr so the caller learns the old password may remain.
+func clearAfterFailedWrite(token uint64, writeErr error) error {
+	clipboardMu.Lock()
+	if clipboardToken != token {
+		clipboardMu.Unlock()
+		return writeErr
+	}
+	clipboardStalePwds = nil
+	writeFn := writeClipboard
+	clipboardMu.Unlock()
+
+	if err := writeFn(""); err != nil {
+		return errors.Join(writeErr, fmt.Errorf("clear previous password from clipboard: %w; it may still be on the clipboard", err))
+	}
+	return writeErr
 }
 
 // effectiveClearTimeout shortens a positive timeout to
