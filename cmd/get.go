@@ -9,11 +9,26 @@ import (
 	"github.com/atotto/clipboard"
 	"github.com/nanaki-93/pwd-manager/internal/utils"
 	"github.com/spf13/cobra"
+	"os"
 	"time"
 )
 
 var getCopyFlag bool
 var clipboardWriteAll = clipboard.WriteAll
+
+// getRevealFlag allows printing the plaintext password when standard output
+// is not a terminal (pipes, redirected files, CI logs).
+var getRevealFlag bool
+
+// stdoutIsTerminal reports whether standard output is an interactive
+// terminal; a package variable so tests can choose either path.
+var stdoutIsTerminal = func() bool {
+	info, err := os.Stdout.Stat()
+	return err == nil && info.Mode()&os.ModeCharDevice != 0
+}
+
+// errRevealRequired reports a refused print to a non-terminal output.
+var errRevealRequired = errors.New("refusing to print the password to non-terminal output; use --copy, or --reveal to print it anyway")
 
 // getClearAfterFlag is how long `get --copy` keeps the password on the
 // clipboard before clearing it.
@@ -43,6 +58,8 @@ func init() {
 		"Copy the password to the clipboard; the command waits --clear-after (or Ctrl+C) and then clears it if unchanged. Until cleared it is readable by other local processes and clipboard history tools")
 	getCmd.Flags().DurationVar(&getClearAfterFlag, "clear-after", addClipboardClearDelay,
 		"With --copy, how long the password stays on the clipboard before it is cleared")
+	getCmd.Flags().BoolVar(&getRevealFlag, "reveal", false,
+		"Print the password even when standard output is not a terminal (pipes, files, logs). Without --copy the password is printed only to a terminal or with --reveal")
 	err := getCmd.MarkFlagRequired("name")
 	utils.ManageErrorAndExit(err)
 }
@@ -67,6 +84,16 @@ func handleGetOutput(name string, savedPasswords map[string]string, copyToClipbo
 	if copyToClipboard {
 		return copyAndClearPassword(pwd, getClearAfterFlag)
 	}
+	return printPassword(name, pwd, getRevealFlag)
+}
+
+// printPassword writes name:pwd to stdout only when stdout is a terminal or
+// reveal is set, warning on stderr that the secret is now visible.
+func printPassword(name, pwd string, reveal bool) error {
+	if !reveal && !stdoutIsTerminal() {
+		return fmt.Errorf("get password '%s': %w", name, errRevealRequired)
+	}
+	fmt.Fprintln(os.Stderr, "Warning: printing the password in plaintext; it may persist in scrollback or logs (use --copy to avoid this).")
 	fmt.Printf("%s:%s", name, pwd)
 	return nil
 }

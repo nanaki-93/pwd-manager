@@ -114,6 +114,10 @@ func TestHandleGetOutputDefault(t *testing.T) {
 		return nil
 	}
 
+	oldReveal := getRevealFlag
+	defer func() { getRevealFlag = oldReveal }()
+	getRevealFlag = true
+
 	passwords := map[string]string{"github": "s3cr3t"}
 	var gotErr error
 	out := captureStdout(t, func() {
