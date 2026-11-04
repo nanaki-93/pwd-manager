@@ -7,6 +7,7 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
@@ -134,6 +135,14 @@ func TestHandleGetOutputCopySuccess(t *testing.T) {
 	oldWrite := clipboardWriteAll
 	defer func() { clipboardWriteAll = oldWrite }()
 
+	oldClearer := getClipboardClearer
+	defer func() { getClipboardClearer = oldClearer }()
+	cleared := ""
+	getClipboardClearer = func(pwd string, _ time.Duration) error {
+		cleared = pwd
+		return nil
+	}
+
 	var copied string
 	clipboardWriteAll = func(text string) error {
 		copied = text
@@ -148,6 +157,9 @@ func TestHandleGetOutputCopySuccess(t *testing.T) {
 
 	if gotErr != nil {
 		t.Fatalf("expected nil error, got %v", gotErr)
+	}
+	if cleared != "s3cr3t" {
+		t.Fatalf("expected clipboard clear to be scheduled for the copied password, got %q", cleared)
 	}
 	if copied != "s3cr3t" {
 		t.Fatalf("expected 's3cr3t' copied to clipboard, got %q", copied)
