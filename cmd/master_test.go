@@ -33,6 +33,7 @@ func withTempHome(t *testing.T) string {
 
 	tmpHome := t.TempDir()
 	t.Setenv("HOME", tmpHome)
+	t.Setenv(utils.LegacyMigrationEnv, "1") // fixtures seed legacy key-file stores
 	utils.SetMasterKey(nil)
 	return tmpHome
 }

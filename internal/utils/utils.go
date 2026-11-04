@@ -31,6 +31,13 @@ import (
 const PwdFileName = ".pwd-mng"
 const PwdFileKey = ".pwd-key"
 
+// FormatMarkerName is written beside the store once a v3 store has been saved.
+const FormatMarkerName = ".pwd-mng-v3"
+
+// LegacyMigrationEnv must be "1" to read a headerless store with the legacy key
+// file, so it can be migrated to the password-derived format once.
+const LegacyMigrationEnv = "PWD_MNG_MIGRATE_LEGACY"
+
 const (
 	hashPrefix     = "pbkdf2-sha256$"
 	saltSize       = 16
@@ -57,6 +64,8 @@ var (
 	errDecryptFailed = errors.New("decrypt file err")
 	ErrSymlink       = errors.New("refusing to access symlink")
 	ErrNonRegular    = errors.New("refusing to access non-regular file")
+	// ErrLegacyStore is returned for a headerless key-file store outside migration.
+	ErrLegacyStore = errors.New("refusing legacy key-file store")
 	// ErrMasterKeyRequired is returned when saving the store without a master password in memory.
 	ErrMasterKeyRequired = errors.New("master password required to encrypt store")
 
@@ -206,10 +215,11 @@ func VerifyMasterPassword(stored string, candidate []byte) bool {
 	return subtle.ConstantTimeCompare(expectedDK, actualDK) == 1
 }
 
-// hashNeedsUpgrade reports whether stored was written with other than the current KDF parameters.
+// hashNeedsUpgrade reports whether stored was written with a weaker work factor
+// than pbkdf2Iter; higher iteration counts are kept as they are.
 func hashNeedsUpgrade(stored string) bool {
 	iter, _, _, ok := parsePBKDF2Hash(stored)
-	return ok && iter != pbkdf2Iter
+	return ok && iter < pbkdf2Iter
 }
 
 func parsePBKDF2Hash(stored string) (int, []byte, []byte, bool) {
@@ -320,7 +330,7 @@ func readSensitiveFile(path string) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
+	f, err := os.OpenFile(path, os.O_RDONLY|openNoFollow, 0)
 	if err != nil {
 		return nil, err
 	}
@@ -334,7 +344,13 @@ func readSensitiveFile(path string) ([]byte, error) {
 	if !st.Mode().IsRegular() || !os.SameFile(fi, st) {
 		return nil, fmt.Errorf("%w: %s", ErrNonRegular, path)
 	}
-	return io.ReadAll(f)
+	// Size the buffer from Stat so the read does not repeatedly grow and copy;
+	// the extra MinRead lets ReadFrom see EOF without reallocating.
+	buf := bytes.NewBuffer(make([]byte, 0, st.Size()+bytes.MinRead))
+	if _, err := buf.ReadFrom(f); err != nil {
+		return nil, fmt.Errorf("read %s: %w", path, err)
+	}
+	return buf.Bytes(), nil
 }
 
 func writeTempSensitiveFile(tmpFile *os.File, content []byte) error {
@@ -427,6 +443,9 @@ func encryptFileWithSecret(content, secret []byte) error {
 	if err := encryptFileWithRawKey(content, key, prefix); err != nil {
 		return err
 	}
+	if err := writeFormatMarker(); err != nil {
+		return err
+	}
 	keyPath, err := resolveHomePath(PwdFileKey)
 	if err != nil {
 		return err
@@ -443,17 +462,17 @@ func encryptFileWithRawKey(content, key, prefix []byte) error {
 	if err != nil {
 		return fmt.Errorf("cipher GCM init: %w", err)
 	}
-	nonce := make([]byte, gcm.NonceSize())
+	// One buffer holds prefix | nonce | ciphertext | tag, so Seal appends in place
+	// instead of reallocating and the prefix needs no second copy.
+	nonceSize := gcm.NonceSize()
+	out := make([]byte, 0, len(prefix)+nonceSize+len(content)+gcm.Overhead())
+	out = append(out, prefix...)
+	out = out[:len(prefix)+nonceSize]
+	nonce := out[len(prefix):]
 	if _, err := randRead(rand.Reader, nonce); err != nil {
 		return fmt.Errorf("generate nonce: %w", err)
 	}
-	cipherText := gcm.Seal(nonce, nonce, content, nil)
-	if len(prefix) > 0 {
-		out := make([]byte, 0, len(prefix)+len(cipherText))
-		out = append(out, prefix...)
-		out = append(out, cipherText...)
-		cipherText = out
-	}
+	cipherText := gcm.Seal(out, nonce, content, nil)
 	pwdPath, err := resolveHomePath(PwdFileName)
 	if err != nil {
 		return err
@@ -501,6 +520,16 @@ func readPwdFileWithIter() ([]byte, int, error) {
 		plain, err := decryptV2(cipherText[len(v2Magic):])
 		return plain, legacyPBKDF2Iter, err
 	}
+	return readLegacyKeyFileStore(cipherText)
+}
+
+// readLegacyKeyFileStore decrypts a headerless store with the raw key file. The
+// key file needs no password, so this is allowed only while migrating: the user
+// must opt in with LegacyMigrationEnv=1 and no v3 store may have been written.
+func readLegacyKeyFileStore(cipherText []byte) ([]byte, int, error) {
+	if err := legacyMigrationAllowed(); err != nil {
+		return nil, 0, err
+	}
 	keyPath, err := resolveHomePath(PwdFileKey)
 	if err != nil {
 		return nil, 0, err
@@ -509,8 +538,41 @@ func readPwdFileWithIter() ([]byte, int, error) {
 	if err != nil {
 		return nil, 0, err
 	}
+	defer wipeBytes(key)
 	plain, err := decryptWithKey(cipherText, key)
 	return plain, 0, err
+}
+
+func legacyMigrationAllowed() error {
+	if os.Getenv(LegacyMigrationEnv) != "1" {
+		return fmt.Errorf("%w: set %s=1 to migrate it once", ErrLegacyStore, LegacyMigrationEnv)
+	}
+	markerPath, err := resolveHomePath(FormatMarkerName)
+	if err != nil {
+		return err
+	}
+	if _, err := os.Lstat(markerPath); err == nil {
+		return fmt.Errorf("%w: a v3 store was already written", ErrLegacyStore)
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("check store format marker: %w", err)
+	}
+	return nil
+}
+
+// writeFormatMarker records that a v3 store was written, after which headerless
+// stores are refused even with LegacyMigrationEnv set.
+func writeFormatMarker() error {
+	markerPath, err := resolveHomePath(FormatMarkerName)
+	if err != nil {
+		return err
+	}
+	if _, err := os.Lstat(markerPath); err == nil {
+		return nil
+	}
+	if err := writeSensitiveFileAtomic(markerPath, []byte(v3Magic)); err != nil {
+		return fmt.Errorf("write store format marker: %w", err)
+	}
+	return nil
 }
 
 func decryptV3(payload []byte) ([]byte, int, error) {
@@ -595,10 +657,11 @@ func getPwdObjWithIter() (model.PwdFile, int, error) {
 }
 
 // upgradeKDFIfNeeded re-hashes the master password and re-encrypts the store with
-// the current KDF parameters after a successful unlock with older ones.
+// the current KDF parameters after a successful unlock with weaker ones. Stores
+// and hashes already at or above pbkdf2Iter are left untouched.
 func upgradeKDFIfNeeded(pwdObj *model.PwdFile, password []byte, storeIter int) error {
 	rehash := hashNeedsUpgrade(pwdObj.MasterPassword)
-	if !rehash && storeIter == pbkdf2Iter {
+	if !rehash && storeIter >= pbkdf2Iter {
 		return nil
 	}
 	upgraded := *pwdObj

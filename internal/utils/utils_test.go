@@ -445,7 +445,7 @@ func TestFileOperations_PreserveWorkingDirAndEnforcePermissions(t *testing.T) {
 	if err != nil {
 		t.Fatalf("readdir home: %v", err)
 	}
-	if len(entries) != 1 || entries[0].Name() != PwdFileName {
+	if names := dirNames(entries); names != PwdFileName+","+FormatMarkerName {
 		t.Fatalf("unexpected files in home dir after atomic write: %v", entries)
 	}
 
