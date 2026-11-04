@@ -23,7 +23,7 @@ func TestCopyPasswordToClipboard_RetryPreservesExternallyChangedContent(t *testi
 	}
 }
 
-func TestCopyPasswordToClipboard_ExhaustedReadRetriesDoNotClearUnverified(t *testing.T) {
+func TestCopyPasswordToClipboard_ExhaustedReadRetriesForceClear(t *testing.T) {
 	h := newReadFailureHarness(t, 1000)
 	clipboardClearRetryDelays = nil // Exercise the zero-retry boundary.
 	writes := 0
@@ -32,8 +32,8 @@ func TestCopyPasswordToClipboard_ExhaustedReadRetriesDoNotClearUnverified(t *tes
 	if h.reads != 1 || len(h.callbacks) != 1 {
 		t.Fatalf("expected one attempt and no retry, reads %d callbacks %d", h.reads, len(h.callbacks))
 	}
-	if writes != 0 {
-		t.Fatalf("unverified clipboard must not be cleared, got %d writes", writes)
+	if writes != 1 {
+		t.Fatalf("unverified clipboard must be force-cleared once, got %d writes", writes)
 	}
 	if len(h.reported) != 1 {
 		t.Fatalf("expected one failure report, got %v", h.reported)
@@ -42,8 +42,8 @@ func TestCopyPasswordToClipboard_ExhaustedReadRetriesDoNotClearUnverified(t *tes
 	if !errors.Is(err, errReadFailure) {
 		t.Fatalf("report must preserve the read failure: %v", err)
 	}
-	if !strings.Contains(err.Error(), "may still be on the clipboard") {
-		t.Fatalf("report must warn about retained secret: %v", err)
+	if !strings.Contains(err.Error(), "giving up") {
+		t.Fatalf("report must say the verified clear gave up: %v", err)
 	}
 }
 

@@ -52,6 +52,11 @@ var (
 	reportClipboardClearFailure = func(err error) {
 		fmt.Fprintf(os.Stderr, "pwd-manager: clipboard auto-clear: %v\n", err)
 	}
+	// notifyClipboardClearFailure shows the final auto-clear outcome in a
+	// visible desktop notification, since a GUI daemon user rarely sees stderr.
+	notifyClipboardClearFailure = func(msg string) error {
+		return zenity.Notify(msg, zenity.Title("Password Manager"))
+	}
 
 	// clipboardClearMu serializes a clear's verify-then-write against the
 	// start of a new copy, so a copy cannot write its password between the
@@ -393,8 +398,8 @@ func clearClipboardIfTokenMatches(token uint64, pwd string) {
 
 // clearClipboardAttempt verifies the clipboard still holds pwd and clears it.
 // A failed read is retried after clipboardClearRetryDelays[attempt]; once the
-// retries are exhausted the clipboard is left untouched, because it cannot be
-// verified to hold a password, and the failure is reported. The final token
+// retries are exhausted the clipboard is cleared unverified and the failure is
+// reported and shown in a desktop notification. The final token
 // check and the clearing write run under clipboardClearMu, so no new copy can
 // start between them and have its password erased.
 func clearClipboardAttempt(token uint64, pwd string, attempt int) {
@@ -462,9 +467,46 @@ func handleClearReadFailure(token uint64, pwd string, attempt int, readErr error
 	}
 	// Giving up: drop the plaintext passwords no clear will use any more.
 	clipboardOwned, clipboardActivePwd, clipboardStalePwds = false, "", nil
+	notify := notifyClipboardClearFailure
 	clipboardMu.Unlock()
 
-	// The clipboard cannot be verified to still hold the password, so it is
-	// left untouched rather than risk erasing unrelated user content.
-	report(fmt.Errorf("read clipboard before clearing password (attempt %d, giving up): %w; the password may still be on the clipboard", attempt+1, readErr))
+	// The clipboard cannot be verified to still hold the password. Leaving it
+	// would keep the secret readable indefinitely, so it is cleared anyway
+	// and the user is alerted visibly, since a GUI daemon has no terminal.
+	giveUpErr := fmt.Errorf("read clipboard before clearing password (attempt %d, giving up): %w", attempt+1, readErr)
+	msg := "Could not verify the clipboard, so it was cleared to remove the copied password."
+	cleared, clearErr := forceClearClipboard(token)
+	switch {
+	case clearErr != nil:
+		giveUpErr = errors.Join(giveUpErr, fmt.Errorf("clear unverified clipboard: %w; the password may still be on the clipboard", clearErr))
+		msg = "Could not clear the clipboard; the copied password may still be on it. Clear it manually."
+	case !cleared:
+		// A newer copy started and owns the clear now.
+		report(giveUpErr)
+		return
+	}
+	report(giveUpErr)
+	if err := notify(msg); err != nil {
+		report(fmt.Errorf("show clipboard auto-clear alert: %w", err))
+	}
+}
+
+// forceClearClipboard clears the clipboard without verifying its content,
+// as a last resort once reads keep failing. It holds clipboardClearMu across
+// the token check and the write, so a newer copy is never erased; it reports
+// cleared=false when a newer copy already started.
+func forceClearClipboard(token uint64) (bool, error) {
+	clipboardClearMu.Lock()
+	defer clipboardClearMu.Unlock()
+	clipboardMu.Lock()
+	if clipboardToken != token {
+		clipboardMu.Unlock()
+		return false, nil
+	}
+	writeFn := writeClipboard
+	clipboardMu.Unlock()
+	if err := writeFn(""); err != nil {
+		return false, err
+	}
+	return true, nil
 }
