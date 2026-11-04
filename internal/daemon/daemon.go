@@ -60,10 +60,16 @@ var (
 	clipboardMu      sync.Mutex
 	clipboardTimer   *time.Timer
 	clipboardToken   uint64
-	// clipboardStalePwds holds passwords of copies superseded while their
-	// write was in flight. Such a write can land after the active copy's
-	// write, so the active clear also removes these values.
+	// clipboardStalePwds holds passwords of superseded copies that may still
+	// be on the clipboard (including writes that land after a newer copy's
+	// write), so the active clear also removes these values. It is emptied
+	// only once a clear verified the clipboard no longer holds any of them.
 	clipboardStalePwds []string
+	// clipboardOwned reports whether the current token owns a clear: its copy
+	// is in flight, or its clear is scheduled or retrying. clipboardActivePwd
+	// is the password that clear removes.
+	clipboardOwned     bool
+	clipboardActivePwd string
 )
 
 // markClipboardConcealed attaches concealment hints to the clipboard entry.
@@ -169,32 +175,29 @@ func copyPasswordToClipboard(pwd string) error {
 	clipboardMu.Lock()
 	clipboardToken++
 	token := clipboardToken
-	// A pending timer means an earlier password may still be on the
-	// clipboard; its clear is cancelled here and must be replaced.
-	hadPendingClear := clipboardTimer != nil || len(clipboardStalePwds) > 0
+	// The earlier copy's clear is cancelled here (even if that copy is still
+	// in flight), so its password is handed to this copy's clear.
+	if clipboardOwned {
+		clipboardStalePwds = append(clipboardStalePwds, clipboardActivePwd)
+	}
+	clipboardOwned, clipboardActivePwd = true, pwd
 	if clipboardTimer != nil {
 		clipboardTimer.Stop()
 		clipboardTimer = nil
 	}
-	// Writes of earlier copies that land after this one are recorded again.
-	clipboardStalePwds = nil
 	writeFn := writeClipboard
 	clipboardMu.Unlock()
 	clipboardClearMu.Unlock()
 
 	if err := writeFn(pwd); err != nil {
-		werr := fmt.Errorf("write password to clipboard: %w", err)
-		if hadPendingClear {
-			return clearAfterFailedWrite(token, werr)
-		}
-		return werr
+		return clearAfterFailedWrite(token, fmt.Errorf("write password to clipboard: %w", err))
 	}
 
 	clipboardMu.Lock()
 	if clipboardToken != token {
 		// A newer copy started while this write was in flight; this write may
 		// have landed last, so the newer copy's clear must remove pwd too.
-		clipboardStalePwds = append(clipboardStalePwds, pwd)
+		adoptStaleLocked(pwd)
 		clipboardMu.Unlock()
 		return nil
 	}
@@ -224,7 +227,7 @@ func copyPasswordToClipboard(pwd string) error {
 	clipboardMu.Lock()
 	defer clipboardMu.Unlock()
 	if clipboardToken != token {
-		clipboardStalePwds = append(clipboardStalePwds, pwd)
+		adoptStaleLocked(pwd)
 		return nil
 	}
 
@@ -235,24 +238,85 @@ func copyPasswordToClipboard(pwd string) error {
 	return nil
 }
 
-// clearAfterFailedWrite runs a best-effort clear after writing a new password
-// failed, because that copy already cancelled the earlier password's pending
-// clear. It skips the clear when a newer copy has started, and joins any clear
-// failure to writeErr so the caller learns the old password may remain.
+// clearAfterFailedWrite runs a best-effort verified clear after writing a new
+// password failed, because that copy already cancelled the earlier
+// passwords' pending clear. It clears only if the clipboard still holds one
+// of those passwords, leaves the work to a newer copy that has started, and
+// joins any read or clear failure to writeErr so the caller learns the old
+// password may remain. An earlier write still in flight schedules its own
+// clear when it lands (see adoptStaleLocked).
 func clearAfterFailedWrite(token uint64, writeErr error) error {
 	clipboardMu.Lock()
 	if clipboardToken != token {
 		clipboardMu.Unlock()
 		return writeErr
 	}
-	clipboardStalePwds = nil
+	clipboardOwned, clipboardActivePwd = false, ""
+	targets := slices.Clone(clipboardStalePwds)
+	readFn := readClipboard
+	clipboardMu.Unlock()
+	if len(targets) == 0 {
+		return writeErr
+	}
+
+	current, err := readFn()
+	if err != nil {
+		return errors.Join(writeErr, fmt.Errorf("read clipboard to clear previous password: %w; it may still be on the clipboard", err))
+	}
+	if !clipboardHoldsAny(current, targets) {
+		return writeErr
+	}
+	if err := clearVerifiedClipboard(token); err != nil {
+		return errors.Join(writeErr, fmt.Errorf("clear previous password from clipboard: %w; it may still be on the clipboard", err))
+	}
+	return writeErr
+}
+
+// clearVerifiedClipboard clears the clipboard after the caller verified it
+// holds a tracked password. It holds clipboardClearMu across the final token
+// check and the write, so no new copy can start in between and have its
+// password erased; if a newer copy already started, nothing is cleared.
+func clearVerifiedClipboard(token uint64) error {
+	clipboardClearMu.Lock()
+	defer clipboardClearMu.Unlock()
+	clipboardMu.Lock()
+	if clipboardToken != token {
+		clipboardMu.Unlock()
+		return nil
+	}
+	clipboardOwned, clipboardActivePwd = false, ""
 	writeFn := writeClipboard
 	clipboardMu.Unlock()
 
 	if err := writeFn(""); err != nil {
-		return errors.Join(writeErr, fmt.Errorf("clear previous password from clipboard: %w; it may still be on the clipboard", err))
+		return err
 	}
-	return writeErr
+	// clipboardClearMu is still held, so the token cannot have changed.
+	clipboardMu.Lock()
+	clipboardStalePwds = nil
+	clipboardMu.Unlock()
+	return nil
+}
+
+// adoptStaleLocked records pwd, whose write landed after a newer copy
+// started, for the newer copy's clear. If the newer copy owns no clear any
+// more (its write failed or its clear already ran), a clear is scheduled for
+// pwd here with the unhinted retention, since no hint was attached for it.
+// The caller holds clipboardMu.
+func adoptStaleLocked(pwd string) {
+	clipboardStalePwds = append(clipboardStalePwds, pwd)
+	if clipboardOwned {
+		return
+	}
+	clipboardOwned, clipboardActivePwd = true, pwd
+	timeout := clipboardClearTimeout
+	if timeout <= 0 {
+		timeout = DefaultClipboardClearTimeout
+	}
+	token := clipboardToken
+	clipboardTimer = afterFunc(effectiveClearTimeout(timeout, nil), func() {
+		clearClipboardIfTokenMatches(token, pwd)
+	})
 }
 
 // effectiveClearTimeout shortens a positive timeout to
@@ -290,24 +354,22 @@ func clearClipboardAttempt(token uint64, pwd string, attempt int) {
 	}
 
 	clipboardMu.Lock()
-	targets := append([]string{pwd}, clipboardStalePwds...)
-	clipboardMu.Unlock()
-	if !clipboardHoldsAny(current, targets) {
-		return
-	}
-
-	clipboardClearMu.Lock()
-	defer clipboardClearMu.Unlock()
-	clipboardMu.Lock()
 	if clipboardToken != token {
 		clipboardMu.Unlock()
 		return
 	}
-	writeFn := writeClipboard
 	report := reportClipboardClearFailure
+	if !clipboardHoldsAny(current, append([]string{pwd}, clipboardStalePwds...)) {
+		// None of the tracked passwords is on the clipboard any more. A write
+		// still in flight re-registers itself when it lands.
+		clipboardOwned, clipboardActivePwd = false, ""
+		clipboardStalePwds = nil
+		clipboardMu.Unlock()
+		return
+	}
 	clipboardMu.Unlock()
 
-	if err := writeFn(""); err != nil {
+	if err := clearVerifiedClipboard(token); err != nil {
 		report(fmt.Errorf("clear password from clipboard: %w", err))
 	}
 }
@@ -339,6 +401,7 @@ func handleClearReadFailure(token uint64, pwd string, attempt int, readErr error
 		report(fmt.Errorf("read clipboard before clearing password (attempt %d, retrying in %v): %w", attempt+1, delay, readErr))
 		return
 	}
+	clipboardOwned, clipboardActivePwd = false, ""
 	clipboardMu.Unlock()
 
 	// The clipboard cannot be verified to still hold the password, so it is

@@ -28,7 +28,7 @@ func resetClipboardTestState(t *testing.T) {
 			clipboardTimer.Stop()
 			clipboardTimer = nil
 		}
-		clipboardToken = 0
+		clipboardToken, clipboardStalePwds, clipboardOwned, clipboardActivePwd = 0, nil, false, ""
 		clipboardMu.Unlock()
 
 		writeClipboard = origWrite
@@ -624,7 +624,7 @@ func TestCopyPasswordToClipboard_StaleTimerInvalidatedOnSubsequentWriteError(t *
 	}
 
 	scheduledFn()
-	if readReads != 0 {
+	if readReads != 1 { // only the failed copy's verification before its best-effort clear
 		t.Fatalf("expected stale callback to return before reading clipboard, got %d reads", readReads)
 	}
 }

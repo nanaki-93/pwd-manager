@@ -8,7 +8,7 @@ import (
 
 // A failed copy cancels the earlier password's pending clear, so it must
 // clear that password itself instead of leaving it on the clipboard.
-func TestCopyPasswordToClipboard_FailedWriteClearsPreviousPassword(t *testing.T) {
+func TestFailedCopyStillClearsPreviousPassword(t *testing.T) {
 	resetClipboardTestState(t)
 	h := newConcurrentClipboardHarness()
 	if err := copyPasswordToClipboard("old-secret"); err != nil {
@@ -55,6 +55,68 @@ func TestCopyPasswordToClipboard_FailedWriteReportsFailedClear(t *testing.T) {
 	}
 	if got, _ := h.read(); got != "old-secret" {
 		t.Fatalf("precondition: expected old password to remain, got %q", got)
+	}
+}
+
+// The best-effort clear after a failed copy must verify the clipboard first,
+// so content the user copied meanwhile is not erased.
+func TestFailedCopyDoesNotEraseUnrelatedContent(t *testing.T) {
+	resetClipboardTestState(t)
+	h := newConcurrentClipboardHarness()
+	if err := copyPasswordToClipboard("old-secret"); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	_ = h.write("user-content")
+	writeClipboard = func(text string) error {
+		if text != "" {
+			return errors.New("clipboard unavailable")
+		}
+		return h.write(text)
+	}
+	if err := copyPasswordToClipboard("new-secret"); err == nil {
+		t.Fatal("expected write error")
+	}
+	if got, _ := h.read(); got != "user-content" {
+		t.Fatalf("unrelated content erased: got %q", got)
+	}
+}
+
+// An earlier copy whose write lands only after a later copy failed (before
+// any timer was scheduled) must still get a clear.
+func TestFailedCopyDuringInFlightCopyStillClearsIt(t *testing.T) {
+	resetClipboardTestState(t)
+	h := newConcurrentClipboardHarness()
+	started, release := make(chan struct{}), make(chan struct{})
+	writeErr := errors.New("clipboard unavailable")
+	writeClipboard = func(text string) error {
+		switch text {
+		case "old-secret":
+			close(started)
+			<-release
+		case "new-secret":
+			return writeErr
+		}
+		return h.write(text)
+	}
+	oldDone := make(chan error, 1)
+	go func() { oldDone <- copyPasswordToClipboard("old-secret") }()
+	<-started
+	if err := copyPasswordToClipboard("new-secret"); !errors.Is(err, writeErr) {
+		t.Fatalf("expected write error, got %v", err)
+	}
+	close(release)
+	if err := <-oldDone; err != nil {
+		t.Fatalf("unexpected error from older copy: %v", err)
+	}
+	h.mu.Lock()
+	callbacks := append([]func(){}, h.callbacks...)
+	h.mu.Unlock()
+	if len(callbacks) != 1 {
+		t.Fatalf("expected one clear scheduled for the late write, got %d", len(callbacks))
+	}
+	callbacks[0]()
+	if got, _ := h.read(); got != "" {
+		t.Fatalf("expected late-landing password cleared, got %q", got)
 	}
 }
 
