@@ -12,8 +12,8 @@ import (
 
 func resetClipboardTestState(t *testing.T) {
 	t.Helper()
-	origWrite := writeClipboard
-	origRead := readClipboard
+	origWrite, origRead, origNotify := writeClipboard, readClipboard, notifyClipboardClearFailure
+	notifyClipboardClearFailure = func(string) error { return nil }
 	origAfter := afterFunc
 	origTimeout := clipboardClearTimeout
 	origOS := clipboardOS
@@ -30,9 +30,7 @@ func resetClipboardTestState(t *testing.T) {
 		}
 		clipboardToken, clipboardStalePwds, clipboardOwned, clipboardActivePwd = 0, nil, false, ""
 		clipboardMu.Unlock()
-
-		writeClipboard = origWrite
-		readClipboard = origRead
+		writeClipboard, readClipboard, notifyClipboardClearFailure = origWrite, origRead, origNotify
 		afterFunc = origAfter
 		clipboardClearTimeout = origTimeout
 		clipboardOS = origOS
@@ -365,17 +363,16 @@ func TestCopyPasswordToClipboard_ReadErrorOnTimeoutRetriesAndClears(t *testing.T
 	}
 }
 
-func TestCopyPasswordToClipboard_PersistentReadErrorLeavesUnverifiedClipboard(t *testing.T) {
+func TestCopyPasswordToClipboard_PersistentReadErrorForcesClear(t *testing.T) {
 	h := newReadFailureHarness(t, 1000)
-	h.clipboard = "user-content" // unverifiable: may no longer be the password
 	for i := 0; i < len(h.callbacks); i++ {
 		h.callbacks[i]()
 	}
 	if want := len(clipboardClearRetryDelays) + 1; h.reads != want {
 		t.Fatalf("expected %d bounded read attempts, got %d", want, h.reads)
 	}
-	if h.clipboard != "user-content" {
-		t.Fatalf("expected unverified clipboard left untouched, got %q", h.clipboard)
+	if h.clipboard != "" {
+		t.Fatalf("expected unverified clipboard to be force-cleared, got %q", h.clipboard)
 	}
 	last := h.reported[len(h.reported)-1]
 	if !errors.Is(last, errReadFailure) || !strings.Contains(last.Error(), "giving up") {
@@ -608,16 +605,16 @@ func TestCopyPasswordToClipboard_StaleTimerInvalidatedOnSubsequentWriteError(t *
 
 	var scheduledFn func()
 	afterFunc = func(d time.Duration, f func()) *time.Timer {
-		scheduledFn = f
+		if scheduledFn == nil { // keep the stale first-copy timer, not the clear retry
+			scheduledFn = f
+		}
 		tm := time.NewTimer(time.Hour)
 		tm.Stop()
 		return tm
 	}
-
 	if err := copyPasswordToClipboard("same-secret"); err != nil {
 		t.Fatalf("unexpected error on first copy: %v", err)
 	}
-
 	failWrite = true
 	if err := copyPasswordToClipboard("same-secret"); err == nil {
 		t.Fatal("expected write error on second copy")
