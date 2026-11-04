@@ -198,6 +198,27 @@ func TestWriteListOutput_EscapesControlCharacters(t *testing.T) {
 	}
 }
 
+func TestWriteListOutput_EscapesSeparatorAndNewlineInKeys(t *testing.T) {
+	saved := map[string]string{
+		"a: b":             "v1",
+		"x\nfake: entry":   "v2",
+		`back\nslash`:      "v3",
+		"plain-key:no-sep": "v4",
+	}
+
+	var buf bytes.Buffer
+	if err := writeListOutput(&buf, saved, true); err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+	want := `a\: b: v1` + "\n" +
+		`back\\nslash: v3` + "\n" +
+		`plain-key:no-sep: v4` + "\n" +
+		`x\nfake\: entry: v2` + "\n"
+	if got := buf.String(); got != want {
+		t.Fatalf("unexpected output:\n got %q\nwant %q", got, want)
+	}
+}
+
 func TestWriteListOutput_PropagatesWriteError(t *testing.T) {
 	saved := map[string]string{"github": "super-secret-1"}
 	boom := errors.New("broken pipe")

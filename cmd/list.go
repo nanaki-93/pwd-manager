@@ -54,7 +54,7 @@ func writeListOutput(w io.Writer, savedPasswords map[string]string, showPlaintex
 		if showPlaintext {
 			val = savedPasswords[k]
 		}
-		if _, err := fmt.Fprintf(bw, "%s: %s\n", sanitizeForTerminal(k), sanitizeForTerminal(val)); err != nil {
+		if _, err := fmt.Fprintf(bw, "%s: %s\n", escapeListKey(k), sanitizeForTerminal(val)); err != nil {
 			return fmt.Errorf("write list output: %w", err)
 		}
 	}
@@ -62,6 +62,17 @@ func writeListOutput(w io.Writer, savedPasswords map[string]string, showPlaintex
 		return fmt.Errorf("write list output: flush: %w", err)
 	}
 	return nil
+}
+
+// listKeyEscaper escapes backslashes and the ": " separator in key names so
+// that the first unescaped ": " on a text output line always ends the key.
+var listKeyEscaper = strings.NewReplacer(`\`, `\\`, ": ", `\: `)
+
+// escapeListKey renders a stored key for one text output line: the separator
+// and backslashes are escaped first, then control characters, so a key can
+// neither span lines nor be confused with its value.
+func escapeListKey(k string) string {
+	return sanitizeForTerminal(listKeyEscaper.Replace(k))
 }
 
 // sanitizeForTerminal escapes control characters, non-printable runes and
