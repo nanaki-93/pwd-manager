@@ -52,7 +52,7 @@ func copyPasswordToClipboard(password string) error {
 
 func handleGetOutput(name string, savedPasswords map[string]string, copyToClipboard bool) error {
 	if len(savedPasswords) == 0 {
-		fmt.Println("No passwords saved with ")
+		fmt.Printf("No passwords saved with name '%s': the password store is empty. Add one with 'pwd-manager add'.\n", name)
 		return nil
 	}
 	pwd, ok := savedPasswords[name]
