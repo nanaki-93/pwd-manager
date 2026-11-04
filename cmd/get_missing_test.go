@@ -32,6 +32,25 @@ func TestHandleGetOutputEmptyStoreReturnsError(t *testing.T) {
 	}
 }
 
+// An empty-valued entry is present, not a failed lookup. Keep this named
+// regression runnable independently for the missing-password contract.
+func TestHandleGetOutputMissingReturnsError(t *testing.T) {
+	stubRevealEnv(t, true, false)
+	for _, saved := range []map[string]string{{"other": ""}, {}} {
+		if err := handleGetOutput("missing", saved, false); err == nil {
+			t.Fatal("expected lookup failure, got nil")
+		}
+	}
+	out := captureStdout(t, func() {
+		if err := handleGetOutput("", map[string]string{"": ""}, false); err != nil {
+			t.Fatalf("existing empty key and value must succeed: %v", err)
+		}
+	})
+	if out != ":" {
+		t.Fatalf("existing empty entry output = %q, want colon", out)
+	}
+}
+
 func TestHandleGetOutputMissingKeyReturnsError(t *testing.T) {
 	err := handleGetOutput("gitlab", map[string]string{"github": "s3cr3t"}, false)
 	if !errors.Is(err, errPasswordNotFound) {
