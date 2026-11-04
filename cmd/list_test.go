@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"strings"
 	"testing"
 	"unicode/utf8"
@@ -657,6 +658,53 @@ func TestWriteListJSONOutput_FlushErrorIsWrapped(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "write list json output: flush:") {
 		t.Fatalf("expected flush error context, got %q", err.Error())
+	}
+}
+
+func TestCheckPlaintextOutputAllowed_Policy(t *testing.T) {
+	orig := isTerminalWriter
+	t.Cleanup(func() { isTerminalWriter = orig })
+
+	cases := []struct {
+		name             string
+		tty, show, allow bool
+		wantRefused      bool
+	}{
+		{"masked non-tty", false, false, false, false},
+		{"show non-tty refused", false, true, false, true},
+		{"show non-tty with override", false, true, true, false},
+		{"show tty", true, true, false, false},
+	}
+	for _, tc := range cases {
+		tty := tc.tty
+		isTerminalWriter = func(io.Writer) bool { return tty }
+		err := checkPlaintextOutputAllowed(&bytes.Buffer{}, tc.show, tc.allow)
+		if tc.wantRefused != errors.Is(err, errPlaintextNotTTY) {
+			t.Fatalf("%s: got err %v, wantRefused=%v", tc.name, err, tc.wantRefused)
+		}
+	}
+}
+
+func TestCheckPlaintextOutputAllowed_RealNonTTYWriters(t *testing.T) {
+	f, err := os.CreateTemp(t.TempDir(), "out")
+	if err != nil {
+		t.Fatalf("create temp: %v", err)
+	}
+	defer f.Close()
+	for _, w := range []io.Writer{&bytes.Buffer{}, f} {
+		if err := checkPlaintextOutputAllowed(w, true, false); !errors.Is(err, errPlaintextNotTTY) {
+			t.Fatalf("%T: expected refusal, got %v", w, err)
+		}
+		if err := checkPlaintextOutputAllowed(w, false, false); err != nil {
+			t.Fatalf("%T: masked output must be allowed, got %v", w, err)
+		}
+	}
+}
+
+func TestListCmd_HasAllowNonTTYFlag(t *testing.T) {
+	fl := listCmd.Flags().Lookup("allow-non-tty")
+	if fl == nil || fl.DefValue != "false" {
+		t.Fatalf("expected --allow-non-tty flag defaulting to false, got %+v", fl)
 	}
 }
 

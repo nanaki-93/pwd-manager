@@ -6,8 +6,10 @@ package cmd
 import (
 	"bufio"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"os"
 	"sort"
 	"strconv"
 	"strings"
@@ -23,6 +25,8 @@ const maskedPasswordPlaceholder = "********"
 var (
 	listShowFlag bool
 	listJSONFlag bool
+
+	listAllowNonTTYFlag bool
 )
 
 // listCmd represents the list command
@@ -37,6 +41,7 @@ func init() {
 	rootCmd.AddCommand(listCmd)
 	listCmd.Flags().BoolVarP(&listShowFlag, "show", "s", false, "show saved passwords in plaintext")
 	listCmd.Flags().BoolVar(&listJSONFlag, "json", false, "output saved passwords as formatted JSON")
+	listCmd.Flags().BoolVar(&listAllowNonTTYFlag, "allow-non-tty", false, "allow --show to print plaintext passwords when stdout is not a terminal")
 }
 
 func writeListOutput(w io.Writer, savedPasswords map[string]string, showPlaintext bool) error {
@@ -165,7 +170,40 @@ func runListCmd(out, errOut io.Writer, savedPasswords map[string]string, showPla
 	return writeListOutput(out, savedPasswords, showPlaintext)
 }
 
+// errPlaintextNotTTY is returned when --show would write secrets to a
+// non-terminal (file, pipe, CI log) without --allow-non-tty.
+var errPlaintextNotTTY = errors.New("refusing to print plaintext passwords: standard output is not a terminal (pass --allow-non-tty to override)")
+
+// isTerminalWriter reports whether w is a character device such as an
+// interactive terminal. Any other writer is treated as non-interactive.
+var isTerminalWriter = func(w io.Writer) bool {
+	f, ok := w.(*os.File)
+	if !ok {
+		return false
+	}
+	fi, err := f.Stat()
+	if err != nil {
+		return false
+	}
+	return fi.Mode()&os.ModeCharDevice != 0
+}
+
+// checkPlaintextOutputAllowed enforces the plaintext output policy: masked
+// output is always allowed; plaintext requires a terminal or an explicit
+// allowNonTTY opt-in.
+func checkPlaintextOutputAllowed(out io.Writer, showPlaintext, allowNonTTY bool) error {
+	if !showPlaintext || allowNonTTY || isTerminalWriter(out) {
+		return nil
+	}
+	return errPlaintextNotTTY
+}
+
 func execListCmd(cmd *cobra.Command, args []string) {
+	if err := checkPlaintextOutputAllowed(cmd.OutOrStdout(), listShowFlag, listAllowNonTTYFlag); err != nil {
+		_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "Error: %v\n", err)
+		utils.ManageErrorAndExit(err)
+		return
+	}
 	pwdObj, err := utils.GetPwdObjAfterCheckMaster()
 	if err != nil {
 		if listJSONFlag {
