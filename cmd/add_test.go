@@ -365,6 +365,10 @@ func TestCaptureStdoutDrainsOutputLargerThanPipeBuffer(t *testing.T) {
 	// 256 KiB exceeds common OS pipe buffers (~64 KiB); an undrained capture
 	// would block the writer forever.
 	payload := strings.Repeat("x", 256*1024)
+	// On timeout t.Fatal returns while the capture goroutine may still hold
+	// os.Stdout redirected to its pipe; restore it so later tests are unaffected.
+	origStdout := os.Stdout
+	t.Cleanup(func() { os.Stdout = origStdout })
 	done := make(chan string, 1)
 	go func() {
 		done <- captureStdout(t, func() {
