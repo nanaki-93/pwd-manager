@@ -53,9 +53,13 @@ var (
 		fmt.Fprintf(os.Stderr, "pwd-manager: clipboard auto-clear: %v\n", err)
 	}
 
-	clipboardMu    sync.Mutex
-	clipboardTimer *time.Timer
-	clipboardToken uint64
+	// clipboardClearMu serializes a clear's verify-then-write against the
+	// start of a new copy, so a copy cannot write its password between the
+	// clear's check and its write. Lock order: clipboardClearMu, clipboardMu.
+	clipboardClearMu sync.Mutex
+	clipboardMu      sync.Mutex
+	clipboardTimer   *time.Timer
+	clipboardToken   uint64
 	// clipboardStalePwds holds passwords of copies superseded while their
 	// write was in flight. Such a write can land after the active copy's
 	// write, so the active clear also removes these values.
@@ -160,6 +164,8 @@ func showPasswordsMenu() {
 // non-positive clipboardClearTimeout is reported and replaced by
 // DefaultClipboardClearTimeout, so a copied password is always cleared.
 func copyPasswordToClipboard(pwd string) error {
+	// Wait for an in-progress verify-and-clear so it cannot erase this copy.
+	clipboardClearMu.Lock()
 	clipboardMu.Lock()
 	clipboardToken++
 	token := clipboardToken
@@ -174,6 +180,7 @@ func copyPasswordToClipboard(pwd string) error {
 	clipboardStalePwds = nil
 	writeFn := writeClipboard
 	clipboardMu.Unlock()
+	clipboardClearMu.Unlock()
 
 	if err := writeFn(pwd); err != nil {
 		werr := fmt.Errorf("write password to clipboard: %w", err)
@@ -263,8 +270,10 @@ func clearClipboardIfTokenMatches(token uint64, pwd string) {
 
 // clearClipboardAttempt verifies the clipboard still holds pwd and clears it.
 // A failed read is retried after clipboardClearRetryDelays[attempt]; once the
-// retries are exhausted the clipboard is cleared without verification while
-// the token is still active, and the failure is reported.
+// retries are exhausted the clipboard is left untouched, because it cannot be
+// verified to hold a password, and the failure is reported. The final token
+// check and the clearing write run under clipboardClearMu, so no new copy can
+// start between them and have its password erased.
 func clearClipboardAttempt(token uint64, pwd string, attempt int) {
 	clipboardMu.Lock()
 	if clipboardToken != token {
@@ -287,6 +296,8 @@ func clearClipboardAttempt(token uint64, pwd string, attempt int) {
 		return
 	}
 
+	clipboardClearMu.Lock()
+	defer clipboardClearMu.Unlock()
 	clipboardMu.Lock()
 	if clipboardToken != token {
 		clipboardMu.Unlock()
@@ -328,13 +339,9 @@ func handleClearReadFailure(token uint64, pwd string, attempt int, readErr error
 		report(fmt.Errorf("read clipboard before clearing password (attempt %d, retrying in %v): %w", attempt+1, delay, readErr))
 		return
 	}
-	writeFn := writeClipboard
 	clipboardMu.Unlock()
 
-	err := fmt.Errorf("read clipboard before clearing password (attempt %d, giving up): %w", attempt+1, readErr)
-	if werr := writeFn(""); werr != nil {
-		report(errors.Join(err, fmt.Errorf("clear password from clipboard: %w; the password may still be on the clipboard", werr)))
-		return
-	}
-	report(fmt.Errorf("%w; clipboard cleared without verification", err))
+	// The clipboard cannot be verified to still hold the password, so it is
+	// left untouched rather than risk erasing unrelated user content.
+	report(fmt.Errorf("read clipboard before clearing password (attempt %d, giving up): %w; the password may still be on the clipboard", attempt+1, readErr))
 }

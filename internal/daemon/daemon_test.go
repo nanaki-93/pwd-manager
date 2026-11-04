@@ -365,17 +365,17 @@ func TestCopyPasswordToClipboard_ReadErrorOnTimeoutRetriesAndClears(t *testing.T
 	}
 }
 
-func TestCopyPasswordToClipboard_PersistentReadErrorClearsAfterBoundedRetries(t *testing.T) {
+func TestCopyPasswordToClipboard_PersistentReadErrorLeavesUnverifiedClipboard(t *testing.T) {
 	h := newReadFailureHarness(t, 1000)
-
+	h.clipboard = "user-content" // unverifiable: may no longer be the password
 	for i := 0; i < len(h.callbacks); i++ {
 		h.callbacks[i]()
 	}
 	if want := len(clipboardClearRetryDelays) + 1; h.reads != want {
 		t.Fatalf("expected %d bounded read attempts, got %d", want, h.reads)
 	}
-	if h.clipboard != "" {
-		t.Fatalf("expected clipboard cleared after retries were exhausted, got %q", h.clipboard)
+	if h.clipboard != "user-content" {
+		t.Fatalf("expected unverified clipboard left untouched, got %q", h.clipboard)
 	}
 	last := h.reported[len(h.reported)-1]
 	if !errors.Is(last, errReadFailure) || !strings.Contains(last.Error(), "giving up") {
