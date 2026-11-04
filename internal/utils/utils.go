@@ -335,7 +335,13 @@ func readSensitiveFile(path string) ([]byte, error) {
 	if !st.Mode().IsRegular() || !os.SameFile(fi, st) {
 		return nil, fmt.Errorf("%w: %s", ErrNonRegular, path)
 	}
-	return io.ReadAll(f)
+	// Size the buffer from Stat so the read does not repeatedly grow and copy;
+	// the extra MinRead lets ReadFrom see EOF without reallocating.
+	buf := bytes.NewBuffer(make([]byte, 0, st.Size()+bytes.MinRead))
+	if _, err := buf.ReadFrom(f); err != nil {
+		return nil, fmt.Errorf("read %s: %w", path, err)
+	}
+	return buf.Bytes(), nil
 }
 
 func writeTempSensitiveFile(tmpFile *os.File, content []byte) error {
