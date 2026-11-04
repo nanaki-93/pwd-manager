@@ -56,6 +56,10 @@ var (
 	clipboardMu    sync.Mutex
 	clipboardTimer *time.Timer
 	clipboardToken uint64
+	// clipboardStalePwds holds passwords of copies superseded while their
+	// write was in flight. Such a write can land after the active copy's
+	// write, so the active clear also removes these values.
+	clipboardStalePwds []string
 )
 
 // markClipboardConcealed attaches concealment hints to the clipboard entry.
@@ -163,6 +167,8 @@ func copyPasswordToClipboard(pwd string) error {
 		clipboardTimer.Stop()
 		clipboardTimer = nil
 	}
+	// Writes of earlier copies that land after this one are recorded again.
+	clipboardStalePwds = nil
 	writeFn := writeClipboard
 	clipboardMu.Unlock()
 
@@ -172,6 +178,9 @@ func copyPasswordToClipboard(pwd string) error {
 
 	clipboardMu.Lock()
 	if clipboardToken != token {
+		// A newer copy started while this write was in flight; this write may
+		// have landed last, so the newer copy's clear must remove pwd too.
+		clipboardStalePwds = append(clipboardStalePwds, pwd)
 		clipboardMu.Unlock()
 		return nil
 	}
@@ -201,6 +210,7 @@ func copyPasswordToClipboard(pwd string) error {
 	clipboardMu.Lock()
 	defer clipboardMu.Unlock()
 	if clipboardToken != token {
+		clipboardStalePwds = append(clipboardStalePwds, pwd)
 		return nil
 	}
 
@@ -242,7 +252,11 @@ func clearClipboardAttempt(token uint64, pwd string, attempt int) {
 		handleClearReadFailure(token, pwd, attempt, err)
 		return
 	}
-	if subtle.ConstantTimeCompare([]byte(current), []byte(pwd)) != 1 {
+
+	clipboardMu.Lock()
+	targets := append([]string{pwd}, clipboardStalePwds...)
+	clipboardMu.Unlock()
+	if !clipboardHoldsAny(current, targets) {
 		return
 	}
 
@@ -258,6 +272,17 @@ func clearClipboardAttempt(token uint64, pwd string, attempt int) {
 	if err := writeFn(""); err != nil {
 		report(fmt.Errorf("clear password from clipboard: %w", err))
 	}
+}
+
+// clipboardHoldsAny reports whether current equals one of the passwords.
+func clipboardHoldsAny(current string, pwds []string) bool {
+	found := false
+	for _, p := range pwds {
+		if subtle.ConstantTimeCompare([]byte(current), []byte(p)) == 1 {
+			found = true
+		}
+	}
+	return found
 }
 
 func handleClearReadFailure(token uint64, pwd string, attempt int, readErr error) {
