@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"os"
@@ -13,11 +14,15 @@ import (
 func TestRemoveCaptureWarmBaseline(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestRemoveCaptureWarmBaselineChild$", "-test.count=1")
+	cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestRemoveCaptureWarmBaselineChild$", "-test.count=1", "-test.v")
 	cmd.Env = append(os.Environ(), "PWD_MANAGER_CAPTURE_BASELINE_CHILD=1")
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("baseline child failed (context: %v): %v\n%s", ctx.Err(), err, out)
+	}
+	// A filter that matches nothing also exits 0; require the child's own PASS line.
+	if !bytes.Contains(out, []byte("--- PASS: TestRemoveCaptureWarmBaselineChild")) {
+		t.Fatalf("baseline child did not run TestRemoveCaptureWarmBaselineChild:\n%s", out)
 	}
 }
 
