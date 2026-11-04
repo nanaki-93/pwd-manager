@@ -450,17 +450,17 @@ func encryptFileWithRawKey(content, key, prefix []byte) error {
 	if err != nil {
 		return fmt.Errorf("cipher GCM init: %w", err)
 	}
-	nonce := make([]byte, gcm.NonceSize())
+	// One buffer holds prefix | nonce | ciphertext | tag, so Seal appends in place
+	// instead of reallocating and the prefix needs no second copy.
+	nonceSize := gcm.NonceSize()
+	out := make([]byte, 0, len(prefix)+nonceSize+len(content)+gcm.Overhead())
+	out = append(out, prefix...)
+	out = out[:len(prefix)+nonceSize]
+	nonce := out[len(prefix):]
 	if _, err := randRead(rand.Reader, nonce); err != nil {
 		return fmt.Errorf("generate nonce: %w", err)
 	}
-	cipherText := gcm.Seal(nonce, nonce, content, nil)
-	if len(prefix) > 0 {
-		out := make([]byte, 0, len(prefix)+len(cipherText))
-		out = append(out, prefix...)
-		out = append(out, cipherText...)
-		cipherText = out
-	}
+	cipherText := gcm.Seal(out, nonce, content, nil)
 	pwdPath, err := resolveHomePath(PwdFileName)
 	if err != nil {
 		return err
