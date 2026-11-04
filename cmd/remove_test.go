@@ -60,6 +60,34 @@ func TestRemovePasswordEmptyOrMissing(t *testing.T) {
 	})
 }
 
+func TestRemovePasswordMissingKeyReturnsError(t *testing.T) {
+	for _, name := range []string{"missing", ""} {
+		t.Run(name, func(t *testing.T) {
+			saved := map[string]string{"a": "secret", "empty-value": ""}
+			called := false
+			err := removePassword(name, saved, func() error {
+				called = true
+				return nil
+			})
+			if err == nil {
+				t.Fatal("expected an error for a missing key, got nil")
+			}
+			if !strings.Contains(err.Error(), `"`+name+`"`) {
+				t.Fatalf("error must name the missing key %q, got %v", name, err)
+			}
+			if called {
+				t.Fatal("save must not be called for a missing key")
+			}
+			if v, ok := saved["a"]; !ok || v != "secret" {
+				t.Fatalf("existing entry changed: value=%q present=%v", v, ok)
+			}
+			if v, ok := saved["empty-value"]; !ok || v != "" || len(saved) != 2 {
+				t.Fatalf("map must remain unchanged, got %v", saved)
+			}
+		})
+	}
+}
+
 func TestRemovePasswordSuccess(t *testing.T) {
 	saved := map[string]string{"github": "secret", "email": "keep"}
 	called := false
