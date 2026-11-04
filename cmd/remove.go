@@ -6,6 +6,8 @@ package cmd
 import (
 	"errors"
 	"fmt"
+
+	"github.com/nanaki-93/pwd-manager/internal/model"
 	"github.com/nanaki-93/pwd-manager/internal/utils"
 	"github.com/spf13/cobra"
 )
@@ -41,11 +43,15 @@ func execRemoveCmd(cmd *cobra.Command, args []string) {
 	pwdObj, err := utils.GetPwdObjAfterCheckMaster()
 	utils.ManageErrorAndExit(err)
 
-	err = removePassword(nameFlag, pwdObj.SavedPasswords, func() error {
-		utils.SaveFile(pwdObj, err)
-		return nil
+	utils.ManageErrorAndExit(removeFromVault(pwdObj, nameFlag))
+}
+
+// removeFromVault deletes name from pwdObj and persists the vault through
+// saveVault, returning the save error so removePassword can roll back.
+func removeFromVault(pwdObj model.PwdFile, name string) error {
+	return removePassword(name, pwdObj.SavedPasswords, func() error {
+		return saveVault(pwdObj, nil)
 	})
-	utils.ManageErrorAndExit(err)
 }
 
 func init() {

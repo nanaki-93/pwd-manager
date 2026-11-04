@@ -4,6 +4,8 @@ import (
 	"errors"
 	"strings"
 	"testing"
+
+	"github.com/nanaki-93/pwd-manager/internal/model"
 )
 
 // captureRemoveStdout reuses captureStdout, which drains the pipe in a
@@ -95,6 +97,29 @@ func TestRemovePasswordPersistenceFailure(t *testing.T) {
 		}
 		if saved["github"] != "secret" {
 			t.Fatalf("expected map entry to be restored on save failure, got %q", saved["github"])
+		}
+	})
+
+	t.Run("removeFromVault propagates save error", func(t *testing.T) {
+		orig := saveVault
+		t.Cleanup(func() { saveVault = orig })
+		saveErr := errors.New("disk full")
+		var gotIn error = errors.New("unset")
+		saveVault = func(_ model.PwdFile, in error) error {
+			gotIn = in
+			return saveErr
+		}
+		pwdObj := model.PwdFile{SavedPasswords: map[string]string{"github": "secret"}}
+		var err error
+		out := captureRemoveStdout(t, func() { err = removeFromVault(pwdObj, "github") })
+		if !errors.Is(err, saveErr) || out != "" {
+			t.Fatalf("expected wrapped saveErr and no output, err=%v out=%q", err, out)
+		}
+		if gotIn != nil {
+			t.Fatalf("expected nil save input error, got %v", gotIn)
+		}
+		if pwdObj.SavedPasswords["github"] != "secret" {
+			t.Fatalf("expected entry restored, got %v", pwdObj.SavedPasswords)
 		}
 	})
 
