@@ -3,6 +3,8 @@ package cmd
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -42,6 +44,40 @@ func TestWriteListJSONOutputEscapesC1Controls(t *testing.T) {
 		if got[k] != v {
 			t.Errorf("round-trip %q = %q, want %q", k, got[k], v)
 		}
+	}
+}
+
+// Exercise every C1 code point in both positions, including masked keys.
+func TestWriteListJSONOutputEntireC1Range(t *testing.T) {
+	for r := rune(0x80); r <= 0x9f; r++ {
+		t.Run(fmt.Sprintf("U+%04X", r), func(t *testing.T) {
+			key, value := "key"+string(r), string(r)+"value"
+			for _, show := range []bool{false, true} {
+				var buf bytes.Buffer
+				if err := writeListJSONOutput(&buf, map[string]string{key: value}, show); err != nil {
+					t.Fatal(err)
+				}
+				out := buf.String()
+				if strings.ContainsRune(out, r) {
+					t.Fatalf("show=%v: raw C1 rune in %q", show, out)
+				}
+				count := 1
+				wantValue := maskedPasswordPlaceholder
+				if show {
+					count, wantValue = 2, value
+				}
+				if got := strings.Count(out, fmt.Sprintf(`\u%04x`, r)); got != count {
+					t.Errorf("show=%v: escape count = %d, want %d", show, got, count)
+				}
+				var got map[string]string
+				if err := json.Unmarshal(buf.Bytes(), &got); err != nil {
+					t.Fatal(err)
+				}
+				if !reflect.DeepEqual(got, map[string]string{key: wantValue}) {
+					t.Errorf("show=%v: round-trip = %q", show, got)
+				}
+			}
+		})
 	}
 }
 
