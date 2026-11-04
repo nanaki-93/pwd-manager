@@ -210,18 +210,32 @@ func hasNonASCII(b []byte) bool {
 	return false
 }
 
+// runListCmd writes the vault in text or JSON form. In both modes a failure is
+// reported once on errOut as "Error: ..." and returned to the caller.
 func runListCmd(out, errOut io.Writer, savedPasswords map[string]string, showPlaintext, asJSON bool) error {
+	var err error
 	if asJSON {
-		if err := writeListJSONOutput(out, savedPasswords, showPlaintext); err != nil {
-			if errOut != nil {
-				_, _ = fmt.Fprintf(errOut, "Error: %v\n", err)
-			}
-			return err
-		}
-		return nil
+		err = writeListJSONOutput(out, savedPasswords, showPlaintext)
+	} else {
+		err = writeListOutput(out, savedPasswords, showPlaintext)
 	}
-	return writeListOutput(out, savedPasswords, showPlaintext)
+	if err != nil {
+		reportListError(errOut, err)
+	}
+	return err
 }
+
+// reportListError writes err to errOut (stderr) regardless of output mode.
+func reportListError(errOut io.Writer, err error) {
+	if errOut != nil {
+		_, _ = fmt.Fprintf(errOut, "Error: %v\n", err)
+	}
+}
+
+// listExitFunc terminates the process after a list failure. Unlike
+// utils.ManageErrorAndExit it prints nothing, so the error already reported
+// on stderr is not repeated on stdout, where it would corrupt JSON output.
+var listExitFunc = os.Exit
 
 // errPlaintextNotTTY is returned when --show would write secrets to a
 // non-terminal (file, pipe, CI log) without --allow-non-tty.
@@ -253,18 +267,17 @@ func checkPlaintextOutputAllowed(out io.Writer, showPlaintext, allowNonTTY bool)
 
 func execListCmd(cmd *cobra.Command, args []string) {
 	if err := checkPlaintextOutputAllowed(cmd.OutOrStdout(), listShowFlag, listAllowNonTTYFlag); err != nil {
-		_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "Error: %v\n", err)
-		utils.ManageErrorAndExit(err)
+		reportListError(cmd.ErrOrStderr(), err)
+		listExitFunc(1)
 		return
 	}
 	pwdObj, err := utils.GetPwdObjAfterCheckMaster()
 	if err != nil {
-		if listJSONFlag {
-			_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "Error: %v\n", err)
-		}
-		utils.ManageErrorAndExit(err)
+		reportListError(cmd.ErrOrStderr(), err)
+		listExitFunc(1)
 		return
 	}
-	err = runListCmd(cmd.OutOrStdout(), cmd.ErrOrStderr(), pwdObj.SavedPasswords, listShowFlag, listJSONFlag)
-	utils.ManageErrorAndExit(err)
+	if err := runListCmd(cmd.OutOrStdout(), cmd.ErrOrStderr(), pwdObj.SavedPasswords, listShowFlag, listJSONFlag); err != nil {
+		listExitFunc(1)
+	}
 }
