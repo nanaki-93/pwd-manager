@@ -6,8 +6,10 @@ package utils
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/nanaki-93/pwd-manager/internal/model"
@@ -64,6 +66,7 @@ func TestGetPwdObjAfterCheckMaster_V3WrongPasswordFails(t *testing.T) {
 
 func writeKeyFileStore(t *testing.T, home string, content model.PwdFile) {
 	t.Helper()
+	t.Setenv(LegacyMigrationEnv, "1")
 	raw, err := json.Marshal(content)
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
@@ -98,5 +101,44 @@ func TestGetPwdObjAfterCheckMaster_KeyFileStoreVerifiesHash(t *testing.T) {
 	}
 	if got.SavedPasswords["site"] != "value" || !VerifyMasterPassword(got.MasterPassword, secret) {
 		t.Fatalf("unexpected store content after unlock: %+v", got)
+	}
+}
+
+func dirNames(entries []os.DirEntry) string {
+	names := make([]string, 0, len(entries))
+	for _, e := range entries {
+		names = append(names, e.Name())
+	}
+	return strings.Join(names, ",")
+}
+
+// A planted headerless store plus key file must not unlock without the
+// explicit migration opt-in, nor after a v3 store has been written.
+func TestReadPwdFileWithIter_RejectsLegacyStoreWithoutMigration(t *testing.T) {
+	home := withTempHome(t)
+	writeKeyFileStore(t, home, model.PwdFile{MasterPassword: "planted"})
+	if _, _, err := readPwdFileWithIter(); err != nil {
+		t.Fatalf("legacy store with migration enabled: %v", err)
+	}
+
+	t.Setenv(LegacyMigrationEnv, "")
+	if plain, _, err := readPwdFileWithIter(); !errors.Is(err, ErrLegacyStore) || plain != nil {
+		t.Fatalf("legacy store read with migration disabled: plain=%q err=%v", plain, err)
+	}
+
+	t.Setenv(LegacyMigrationEnv, "1")
+	if err := os.WriteFile(filepath.Join(home, FormatMarkerName), []byte(testV3Magic), 0600); err != nil {
+		t.Fatalf("write marker: %v", err)
+	}
+	if plain, _, err := readPwdFileWithIter(); !errors.Is(err, ErrLegacyStore) || plain != nil {
+		t.Fatalf("legacy store read after a v3 store was written: plain=%q err=%v", plain, err)
+	}
+}
+
+func TestSaveFileWritesFormatMarker(t *testing.T) {
+	home := withTempHome(t)
+	writeV3Store(t, []byte("marker-writing-secret"), model.PwdFile{MasterPassword: "x"})
+	if _, err := os.Lstat(filepath.Join(home, FormatMarkerName)); err != nil {
+		t.Fatalf("format marker missing after v3 save: %v", err)
 	}
 }

@@ -31,6 +31,13 @@ import (
 const PwdFileName = ".pwd-mng"
 const PwdFileKey = ".pwd-key"
 
+// FormatMarkerName is written beside the store once a v3 store has been saved.
+const FormatMarkerName = ".pwd-mng-v3"
+
+// LegacyMigrationEnv must be "1" to read a headerless store with the legacy key
+// file, so it can be migrated to the password-derived format once.
+const LegacyMigrationEnv = "PWD_MNG_MIGRATE_LEGACY"
+
 const (
 	hashPrefix     = "pbkdf2-sha256$"
 	saltSize       = 16
@@ -57,6 +64,8 @@ var (
 	errDecryptFailed = errors.New("decrypt file err")
 	ErrSymlink       = errors.New("refusing to access symlink")
 	ErrNonRegular    = errors.New("refusing to access non-regular file")
+	// ErrLegacyStore is returned for a headerless key-file store outside migration.
+	ErrLegacyStore = errors.New("refusing legacy key-file store")
 	// ErrMasterKeyRequired is returned when saving the store without a master password in memory.
 	ErrMasterKeyRequired = errors.New("master password required to encrypt store")
 
@@ -434,6 +443,9 @@ func encryptFileWithSecret(content, secret []byte) error {
 	if err := encryptFileWithRawKey(content, key, prefix); err != nil {
 		return err
 	}
+	if err := writeFormatMarker(); err != nil {
+		return err
+	}
 	keyPath, err := resolveHomePath(PwdFileKey)
 	if err != nil {
 		return err
@@ -508,6 +520,16 @@ func readPwdFileWithIter() ([]byte, int, error) {
 		plain, err := decryptV2(cipherText[len(v2Magic):])
 		return plain, legacyPBKDF2Iter, err
 	}
+	return readLegacyKeyFileStore(cipherText)
+}
+
+// readLegacyKeyFileStore decrypts a headerless store with the raw key file. The
+// key file needs no password, so this is allowed only while migrating: the user
+// must opt in with LegacyMigrationEnv=1 and no v3 store may have been written.
+func readLegacyKeyFileStore(cipherText []byte) ([]byte, int, error) {
+	if err := legacyMigrationAllowed(); err != nil {
+		return nil, 0, err
+	}
 	keyPath, err := resolveHomePath(PwdFileKey)
 	if err != nil {
 		return nil, 0, err
@@ -516,8 +538,41 @@ func readPwdFileWithIter() ([]byte, int, error) {
 	if err != nil {
 		return nil, 0, err
 	}
+	defer wipeBytes(key)
 	plain, err := decryptWithKey(cipherText, key)
 	return plain, 0, err
+}
+
+func legacyMigrationAllowed() error {
+	if os.Getenv(LegacyMigrationEnv) != "1" {
+		return fmt.Errorf("%w: set %s=1 to migrate it once", ErrLegacyStore, LegacyMigrationEnv)
+	}
+	markerPath, err := resolveHomePath(FormatMarkerName)
+	if err != nil {
+		return err
+	}
+	if _, err := os.Lstat(markerPath); err == nil {
+		return fmt.Errorf("%w: a v3 store was already written", ErrLegacyStore)
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("check store format marker: %w", err)
+	}
+	return nil
+}
+
+// writeFormatMarker records that a v3 store was written, after which headerless
+// stores are refused even with LegacyMigrationEnv set.
+func writeFormatMarker() error {
+	markerPath, err := resolveHomePath(FormatMarkerName)
+	if err != nil {
+		return err
+	}
+	if _, err := os.Lstat(markerPath); err == nil {
+		return nil
+	}
+	if err := writeSensitiveFileAtomic(markerPath, []byte(v3Magic)); err != nil {
+		return fmt.Errorf("write store format marker: %w", err)
+	}
+	return nil
 }
 
 func decryptV3(payload []byte) ([]byte, int, error) {
