@@ -14,6 +14,7 @@ import (
 	"strconv"
 	"strings"
 	"unicode"
+	"unicode/utf16"
 	"unicode/utf8"
 
 	"github.com/nanaki-93/pwd-manager/internal/utils"
@@ -150,13 +151,13 @@ func writeJSONEntries(bw *bufio.Writer, keys []string, savedPasswords map[string
 	}
 	sep := "{\n  "
 	for _, k := range keys {
-		key, err := json.Marshal(k)
+		key, err := marshalJSONString(k)
 		if err != nil {
 			return fmt.Errorf("marshal list json output: key: %w", err)
 		}
 		val := masked
 		if showPlaintext {
-			if val, err = json.Marshal(savedPasswords[k]); err != nil {
+			if val, err = marshalJSONString(savedPasswords[k]); err != nil {
 				return fmt.Errorf("marshal list json output: value: %w", err)
 			}
 		}
@@ -169,6 +170,44 @@ func writeJSONEntries(bw *bufio.Writer, keys []string, savedPasswords map[string
 		return fmt.Errorf("write list json output: %w", err)
 	}
 	return nil
+}
+
+// marshalJSONString encodes s like json.Marshal, then rewrites non-printable
+// non-ASCII runes (such as C1 controls U+0080–U+009F) as \uXXXX escapes so the
+// JSON output cannot carry raw terminal control sequences. ASCII-only output
+// is returned unchanged.
+func marshalJSONString(s string) ([]byte, error) {
+	enc, err := json.Marshal(s)
+	if err != nil {
+		return nil, err
+	}
+	if !hasNonASCII(enc) {
+		return enc, nil
+	}
+	out := make([]byte, 0, len(enc)+16)
+	for i := 0; i < len(enc); {
+		r, size := utf8.DecodeRune(enc[i:])
+		switch {
+		case r < utf8.RuneSelf || unicode.IsPrint(r):
+			out = append(out, enc[i:i+size]...)
+		case r > 0xffff:
+			r1, r2 := utf16.EncodeRune(r)
+			out = fmt.Appendf(out, `\u%04x\u%04x`, r1, r2)
+		default:
+			out = fmt.Appendf(out, `\u%04x`, r)
+		}
+		i += size
+	}
+	return out, nil
+}
+
+func hasNonASCII(b []byte) bool {
+	for _, c := range b {
+		if c >= utf8.RuneSelf {
+			return true
+		}
+	}
+	return false
 }
 
 func runListCmd(out, errOut io.Writer, savedPasswords map[string]string, showPlaintext, asJSON bool) error {
