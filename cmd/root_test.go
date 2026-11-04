@@ -312,9 +312,12 @@ func TestInitConfigDoesNotExitOnMissingHomeAndUpdatesContextOnSuccess(t *testing
 	var stderr bytes.Buffer
 	rootCmd.SetErr(&stderr)
 
-	initConfig()
-	if !strings.Contains(stderr.String(), "resolve home directory") {
-		t.Fatalf("expected missing home error on stderr, got %q", stderr.String())
+	err := initConfig()
+	if err == nil || !strings.Contains(err.Error(), "resolve home directory") {
+		t.Fatalf("expected missing home error from initConfig, got %v", err)
+	}
+	if stderr.Len() != 0 {
+		t.Fatalf("expected initConfig to return, not print, the error; stderr %q", stderr.String())
 	}
 
 	tmpDir := t.TempDir()
@@ -325,7 +328,9 @@ func TestInitConfigDoesNotExitOnMissingHomeAndUpdatesContextOnSuccess(t *testing
 	cfgFile = cfgPath
 	stderr.Reset()
 
-	initConfig()
+	if err := initConfig(); err != nil {
+		t.Fatalf("initConfig error = %v, want nil", err)
+	}
 	cfg, ok := ConfigFromContext(rootCmd.Context())
 	if !ok || cfg == nil {
 		t.Fatal("expected initConfig to store Config in rootCmd context")
@@ -356,7 +361,9 @@ func TestInitConfigResolvesDefaultConfigThroughUserHomeDir(t *testing.T) {
 	var stderr bytes.Buffer
 	rootCmd.SetErr(&stderr)
 
-	initConfig()
+	if err := initConfig(); err != nil {
+		t.Fatalf("initConfig error = %v, want nil", err)
+	}
 	cfg, ok := ConfigFromContext(rootCmd.Context())
 	if !ok || cfg == nil {
 		t.Fatalf("expected config in context, stderr %q", stderr.String())

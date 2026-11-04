@@ -161,13 +161,14 @@ func init() {
 	rootCmd.Flags().BoolP("toggle", "t", false, "Help message for toggle")
 }
 
-// initConfig loads configuration into a new Config and updates command context without exiting.
-func initConfig() {
+// initConfig loads configuration into a new Config and updates command context
+// without exiting; it returns the LoadConfig error so callers can act on it.
+func initConfig() error {
 	cfg := NewConfig(cfgFile)
 	cfg.Stderr = rootCmd.ErrOrStderr()
 	if err := LoadConfig(cfg); err != nil {
-		_, _ = fmt.Fprintln(cfg.Stderr, err)
-		return
+		return fmt.Errorf("init config: %w", err)
 	}
 	rootCmd.SetContext(WithConfig(rootCmd.Context(), cfg))
+	return nil
 }
