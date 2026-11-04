@@ -211,6 +211,49 @@ func TestWriteListOutput_PropagatesWriteError(t *testing.T) {
 	}
 }
 
+// countingWriter records how many Write calls reach it.
+type countingWriter struct {
+	calls int
+	buf   bytes.Buffer
+}
+
+func (c *countingWriter) Write(p []byte) (int, error) {
+	c.calls++
+	return c.buf.Write(p)
+}
+
+func TestWriteListOutput_BuffersEntriesIntoFewWrites(t *testing.T) {
+	saved := make(map[string]string, 100)
+	for i := 0; i < 100; i++ {
+		saved[fmt.Sprintf("entry-%03d", i)] = "secret"
+	}
+
+	w := &countingWriter{}
+	if err := writeListOutput(w, saved, false); err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+	if w.calls != 1 {
+		t.Fatalf("expected 1 Write call for small output, got %d", w.calls)
+	}
+	if !strings.HasPrefix(w.buf.String(), "entry-000: ********\n") ||
+		!strings.HasSuffix(w.buf.String(), "entry-099: ********\n") {
+		t.Fatalf("unexpected output: %q", w.buf.String())
+	}
+}
+
+func TestWriteListOutput_FlushErrorIsWrapped(t *testing.T) {
+	saved := map[string]string{"github": "super-secret-1"}
+	boom := errors.New("broken pipe")
+
+	err := writeListOutput(errWriter{err: boom}, saved, false)
+	if !errors.Is(err, boom) {
+		t.Fatalf("expected wrapped error %v, got %v", boom, err)
+	}
+	if !strings.Contains(err.Error(), "write list output: flush:") {
+		t.Fatalf("expected flush error context, got %q", err.Error())
+	}
+}
+
 func TestWriteListOutput_MidStreamWriteError(t *testing.T) {
 	saved := map[string]string{
 		"first":  "secret-1",

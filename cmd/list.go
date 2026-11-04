@@ -4,6 +4,7 @@ Copyright © 2025 Marco Andreose <andreose.marco93@gmail.com>
 package cmd
 
 import (
+	"bufio"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -45,14 +46,20 @@ func writeListOutput(w io.Writer, savedPasswords map[string]string, showPlaintex
 	}
 	sort.Strings(keys)
 
+	// Buffer entries so large vaults do not issue one write syscall per entry
+	// on an unbuffered stdout. Write errors may surface only at Flush.
+	bw := bufio.NewWriter(w)
 	for _, k := range keys {
 		val := maskedPasswordPlaceholder
 		if showPlaintext {
 			val = savedPasswords[k]
 		}
-		if _, err := fmt.Fprintf(w, "%s: %s\n", sanitizeForTerminal(k), sanitizeForTerminal(val)); err != nil {
+		if _, err := fmt.Fprintf(bw, "%s: %s\n", sanitizeForTerminal(k), sanitizeForTerminal(val)); err != nil {
 			return fmt.Errorf("write list output: %w", err)
 		}
+	}
+	if err := bw.Flush(); err != nil {
+		return fmt.Errorf("write list output: flush: %w", err)
 	}
 	return nil
 }
