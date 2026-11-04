@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"context"
 	"crypto/subtle"
 	"errors"
 	"fmt"
@@ -106,27 +107,45 @@ func ConcealedClipboardFlags(goos string) []string {
 	}
 }
 
-func Start() {
-	mainthread.Init(run)
+// Start runs the hotkey daemon on the main thread until ctx is cancelled or
+// the hotkey stops, and returns any startup failure, such as a hotkey that
+// cannot be registered. A ctx already cancelled returns its error unstarted.
+func Start(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return fmt.Errorf("daemon cancelled before start: %w", err)
+	}
+	var err error
+	mainthread.Init(func() {
+		err = listenForHotkey(ctx)
+	})
+	return err
 }
 
-func run() {
-	listenForHotkey()
-}
-
-func listenForHotkey() {
+func listenForHotkey(ctx context.Context) error {
 	hk := hotkey.New([]hotkey.Modifier{hotkey.ModCtrl, hotkey.ModShift}, hotkey.KeyP)
-	err := hk.Register()
-	if err != nil {
-		fmt.Printf("Failed to register hotkey: %v\n", err)
-		return
+	if err := hk.Register(); err != nil {
+		return fmt.Errorf("register hotkey Ctrl+Shift+P: %w", err)
 	}
 	defer hk.Unregister()
 
 	fmt.Println("Daemon running. Press Ctrl+Shift+P to list passwords.")
 
-	for range hk.Keydown() {
-		showPasswordsMenu()
+	return serveHotkey(ctx, hk.Keydown(), showPasswordsMenu)
+}
+
+// serveHotkey calls onPress for each keydown event until ctx is cancelled
+// (returning nil, a clean stop) or the event channel closes.
+func serveHotkey(ctx context.Context, keydown <-chan hotkey.Event, onPress func()) error {
+	for {
+		select {
+		case <-ctx.Done():
+			return nil
+		case _, ok := <-keydown:
+			if !ok {
+				return nil
+			}
+			onPress()
+		}
 	}
 }
 
