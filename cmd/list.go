@@ -97,21 +97,56 @@ func sanitizeForTerminal(s string) string {
 	return b.String()
 }
 
+// writeListJSONOutput streams the vault as an indented JSON object, one entry
+// at a time through a bounded buffer, so neither a copy of the map nor the
+// whole document is held in memory. The bytes match
+// json.MarshalIndent(entries, "", "  ") followed by a newline.
 func writeListJSONOutput(w io.Writer, savedPasswords map[string]string, showPlaintext bool) error {
-	entries := make(map[string]string, len(savedPasswords))
-	for k, v := range savedPasswords {
-		if showPlaintext {
-			entries[k] = v
-		} else {
-			entries[k] = maskedPasswordPlaceholder
-		}
+	keys := make([]string, 0, len(savedPasswords))
+	for k := range savedPasswords {
+		keys = append(keys, k)
 	}
+	sort.Strings(keys)
 
-	data, err := json.MarshalIndent(entries, "", "  ")
+	bw := bufio.NewWriter(w)
+	if err := writeJSONEntries(bw, keys, savedPasswords, showPlaintext); err != nil {
+		return err
+	}
+	if err := bw.Flush(); err != nil {
+		return fmt.Errorf("write list json output: flush: %w", err)
+	}
+	return nil
+}
+
+func writeJSONEntries(bw *bufio.Writer, keys []string, savedPasswords map[string]string, showPlaintext bool) error {
+	if len(keys) == 0 {
+		if _, err := bw.WriteString("{}\n"); err != nil {
+			return fmt.Errorf("write list json output: %w", err)
+		}
+		return nil
+	}
+	masked, err := json.Marshal(maskedPasswordPlaceholder)
 	if err != nil {
 		return fmt.Errorf("marshal list json output: %w", err)
 	}
-	if _, err := fmt.Fprintf(w, "%s\n", data); err != nil {
+	sep := "{\n  "
+	for _, k := range keys {
+		key, err := json.Marshal(k)
+		if err != nil {
+			return fmt.Errorf("marshal list json output: key: %w", err)
+		}
+		val := masked
+		if showPlaintext {
+			if val, err = json.Marshal(savedPasswords[k]); err != nil {
+				return fmt.Errorf("marshal list json output: value: %w", err)
+			}
+		}
+		if _, err := fmt.Fprintf(bw, "%s%s: %s", sep, key, val); err != nil {
+			return fmt.Errorf("write list json output: %w", err)
+		}
+		sep = ",\n  "
+	}
+	if _, err := bw.WriteString("\n}\n"); err != nil {
 		return fmt.Errorf("write list json output: %w", err)
 	}
 	return nil

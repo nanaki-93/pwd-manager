@@ -586,6 +586,80 @@ func TestWriteListJSONOutput_PropagatesWriteError(t *testing.T) {
 	}
 }
 
+func TestWriteListJSONOutput_MatchesMarshalIndentByteForByte(t *testing.T) {
+	saved := map[string]string{}
+	saved["github"] = "super-secret-1"
+	saved["<html>&'\""] = "a<b>&c\"d\\e"
+	saved["bad\xffutf8"] = "v\xfe"
+	saved["ünïcode "] = "line\nbreak\t\x01"
+	saved[""] = ""
+	saved["plain-key:no-sep"] = "p@ss:w0rd!"
+	for _, show := range []bool{false, true} {
+		entries := make(map[string]string, len(saved))
+		for k, v := range saved {
+			entries[k] = maskedPasswordPlaceholder
+			if show {
+				entries[k] = v
+			}
+		}
+		want, err := json.MarshalIndent(entries, "", "  ")
+		if err != nil {
+			t.Fatalf("marshal reference: %v", err)
+		}
+		var buf bytes.Buffer
+		if err := writeListJSONOutput(&buf, saved, show); err != nil {
+			t.Fatalf("show=%v: expected no error, got %v", show, err)
+		}
+		if got := buf.String(); got != string(want)+"\n" {
+			t.Fatalf("show=%v: output differs:\n got %q\nwant %q", show, got, string(want)+"\n")
+		}
+	}
+}
+
+// maxWriteWriter records the largest single Write it receives.
+type maxWriteWriter struct {
+	max   int
+	total int
+}
+
+func (m *maxWriteWriter) Write(p []byte) (int, error) {
+	if len(p) > m.max {
+		m.max = len(p)
+	}
+	m.total += len(p)
+	return len(p), nil
+}
+
+func TestWriteListJSONOutput_StreamsLargeVaultInBoundedWrites(t *testing.T) {
+	saved := make(map[string]string, 5000)
+	for i := 0; i < 5000; i++ {
+		saved[fmt.Sprintf("entry-%05d", i)] = strings.Repeat("s", 32)
+	}
+	for _, show := range []bool{false, true} {
+		w := &maxWriteWriter{}
+		if err := writeListJSONOutput(w, saved, show); err != nil {
+			t.Fatalf("show=%v: expected no error, got %v", show, err)
+		}
+		if w.total < 64*1024 {
+			t.Fatalf("show=%v: payload too small for the test: %d bytes", show, w.total)
+		}
+		if w.max > 4096 {
+			t.Fatalf("show=%v: largest single write was %d bytes of %d; output is not streamed", show, w.max, w.total)
+		}
+	}
+}
+
+func TestWriteListJSONOutput_FlushErrorIsWrapped(t *testing.T) {
+	boom := errors.New("broken pipe")
+	err := writeListJSONOutput(errWriter{err: boom}, map[string]string{"a": "b"}, true)
+	if !errors.Is(err, boom) {
+		t.Fatalf("expected wrapped error %v, got %v", boom, err)
+	}
+	if !strings.Contains(err.Error(), "write list json output: flush:") {
+		t.Fatalf("expected flush error context, got %q", err.Error())
+	}
+}
+
 func TestRunListCmd_DefaultPlainTextWhenJSONOmitted(t *testing.T) {
 	saved := map[string]string{
 		"github": "super-secret-1",
