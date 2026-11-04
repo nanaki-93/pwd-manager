@@ -52,7 +52,10 @@ func ConfigFromContext(ctx context.Context) (*Config, bool) {
 		return nil, false
 	}
 	cfg, ok := ctx.Value(configContextKey{}).(*Config)
-	return cfg, ok
+	if !ok || cfg == nil {
+		return nil, false
+	}
+	return cfg, true
 }
 
 // LoadConfig populates the explicit Config structure without abrupt process exits.
