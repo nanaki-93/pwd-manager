@@ -29,10 +29,33 @@ func TestCaptureRemoveStdoutLargeOutputDoesNotBlock(t *testing.T) {
 			t.Fatalf("captured %d bytes, want %d", len(res.out), len(want))
 		}
 	case <-time.After(10 * time.Second):
+		abandonBlockedCapture(t, original, func() bool {
+			select {
+			case <-done:
+				return true
+			case <-time.After(5 * time.Second):
+				return false
+			}
+		})
 		t.Fatal("captureRemoveStdout blocked on output larger than the pipe buffer")
 	}
 	if os.Stdout != original {
 		t.Fatal("captureRemoveStdout did not restore stdout")
+	}
+}
+
+// abandonBlockedCapture recovers from a capture that never returned: it closes
+// the capture pipe writer still installed as os.Stdout so the blocked write
+// fails, restores os.Stdout to original before the test fails, and joins the
+// capturing goroutine through join so it does not outlive the test.
+func abandonBlockedCapture(t *testing.T, original *os.File, join func() bool) {
+	t.Helper()
+	if capture := os.Stdout; capture != original {
+		_ = capture.Close() // the capture helper closes it again; that error is ignored there
+	}
+	os.Stdout = original
+	if !join() {
+		t.Error("capture goroutine did not exit after its pipe writer was closed")
 	}
 }
 
