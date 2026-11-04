@@ -28,28 +28,32 @@ func runRemovePasswordWithCapture(t *testing.T, name string, saved map[string]st
 }
 
 func TestRemovePasswordEmptyOrMissing(t *testing.T) {
+	assertNotFound := func(t *testing.T, err error, called bool, out string) {
+		t.Helper()
+		if !errors.Is(err, errPasswordNotFound) || !strings.Contains(err.Error(), `"github"`) {
+			t.Fatalf("expected not-found error naming the key, got %v", err)
+		}
+		if called || out != "" {
+			t.Fatalf("called=%v out=%q", called, out)
+		}
+	}
+
 	t.Run("no passwords saved", func(t *testing.T) {
 		out, called, err := runRemovePasswordWithCapture(t, "github", map[string]string{}, nil)
-		if err != nil || called || out != "No passwords saved\n" {
-			t.Fatalf("err=%v called=%v out=%q", err, called, out)
-		}
+		assertNotFound(t, err, called, out)
 	})
 
 	t.Run("nil passwords map", func(t *testing.T) {
 		out, called, err := runRemovePasswordWithCapture(t, "github", nil, nil)
-		if err != nil || called || out != "No passwords saved\n" {
-			t.Fatalf("err=%v called=%v out=%q", err, called, out)
-		}
+		assertNotFound(t, err, called, out)
 	})
 
 	t.Run("password key not found", func(t *testing.T) {
 		saved := map[string]string{"email": "secret"}
 		out, called, err := runRemovePasswordWithCapture(t, "github", saved, nil)
-		if err != nil || called || saved["email"] != "secret" {
-			t.Fatalf("err=%v called=%v saved=%v", err, called, saved)
-		}
-		if out != "Password with key 'github' not found\n" {
-			t.Fatalf("unexpected output %q", out)
+		assertNotFound(t, err, called, out)
+		if len(saved) != 1 || saved["email"] != "secret" {
+			t.Fatalf("expected existing entries untouched, got %v", saved)
 		}
 	})
 }
