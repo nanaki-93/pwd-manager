@@ -17,7 +17,7 @@ func TestGenerateKeyMigratesLegacyStoreBeforeRemovingKeyFile(t *testing.T) {
 	tmpHome := withTempHome(t)
 	utils.SetMasterKey(nil)
 	t.Cleanup(func() { utils.SetMasterKey(nil) })
-	original := model.PwdFile{MasterPassword: "pbkdf2-sha256$x", SavedPasswords: map[string]string{"mail": "c2VjcmV0"}}
+	original := model.PwdFile{MasterPassword: hashFixture(t, "valid-master-secret"), SavedPasswords: map[string]string{"mail": "c2VjcmV0"}}
 	seedLegacyVault(t, tmpHome, bytes.Repeat([]byte{0x42}, 32), original)
 
 	if err := generateKey([]byte("valid-master-secret")); err != nil {
@@ -37,7 +37,7 @@ func TestGenerateKeyKeepsLegacyKeyFileWhenSaveFails(t *testing.T) {
 	utils.SetMasterKey(nil)
 	t.Cleanup(func() { utils.SetMasterKey(nil) })
 	legacyKey := bytes.Repeat([]byte{0x24}, 32)
-	original := model.PwdFile{MasterPassword: "pbkdf2-sha256$x", SavedPasswords: map[string]string{"bank": "aHVudGVy"}}
+	original := model.PwdFile{MasterPassword: hashFixture(t, "valid-master-secret"), SavedPasswords: map[string]string{"bank": "aHVudGVy"}}
 	seedLegacyVault(t, tmpHome, legacyKey, original)
 	storePath := filepath.Join(tmpHome, utils.PwdFileName)
 	before, _ := os.ReadFile(storePath)
@@ -56,6 +56,46 @@ func TestGenerateKeyKeepsLegacyKeyFileWhenSaveFails(t *testing.T) {
 	loaded, err := utils.GetPwdObj()
 	if err != nil || loaded.SavedPasswords["bank"] != "aHVudGVy" {
 		t.Fatalf("legacy store no longer readable (err=%v)", err)
+	}
+}
+
+// hashFixture returns a stored master hash for password.
+func hashFixture(t *testing.T, password string) string {
+	t.Helper()
+	hashed, err := utils.HashMasterPassword([]byte(password))
+	if err != nil {
+		t.Fatalf("hash fixture password: %v", err)
+	}
+	return hashed
+}
+
+// A password that does not match the stored hash must not re-key a store read
+// through the legacy key file, or the user is locked out of it.
+func TestGenerateKeyRejectsWrongPasswordForLegacyStore(t *testing.T) {
+	tmpHome := withTempHome(t)
+	utils.SetMasterKey(nil)
+	t.Cleanup(func() { utils.SetMasterKey(nil) })
+	legacyKey := bytes.Repeat([]byte{0x33}, 32)
+	original := model.PwdFile{MasterPassword: hashFixture(t, "valid-master-secret"), SavedPasswords: map[string]string{"bank": "aHVudGVy"}}
+	seedLegacyVault(t, tmpHome, legacyKey, original)
+	storePath := filepath.Join(tmpHome, utils.PwdFileName)
+	before, err := os.ReadFile(storePath)
+	if err != nil {
+		t.Fatalf("read fixture store: %v", err)
+	}
+
+	if err := generateKey([]byte("wrong-master-secret")); !errors.Is(err, errCurrentPasswordMismatch) {
+		t.Fatalf("expected a password mismatch error, got %v", err)
+	}
+	if got, err := os.ReadFile(storePath); err != nil || !bytes.Equal(got, before) {
+		t.Fatalf("store changed after a wrong password (err=%v)", err)
+	}
+	if got, err := os.ReadFile(filepath.Join(tmpHome, utils.PwdFileKey)); err != nil || !bytes.Equal(got, legacyKey) {
+		t.Fatalf("legacy key file removed or changed after a wrong password (err=%v)", err)
+	}
+	loaded, err := utils.GetPwdObj()
+	if err != nil || loaded.SavedPasswords["bank"] != "aHVudGVy" {
+		t.Fatalf("legacy store no longer readable after a wrong password (err=%v)", err)
 	}
 }
 

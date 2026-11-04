@@ -267,6 +267,11 @@ func generateKey(password ...[]byte) error {
 	content, err := utils.GetPwdObj()
 	switch {
 	case err == nil:
+		// The store may have been read through the legacy key file, so the
+		// password is checked against its hash before it is re-keyed.
+		if !utils.VerifyMasterPassword(content.MasterPassword, pwd) {
+			return fmt.Errorf("generate key: %w", errCurrentPasswordMismatch)
+		}
 		return pending.install(&content)
 	case errors.Is(err, os.ErrNotExist):
 		if err := pending.install(nil); err != nil {
