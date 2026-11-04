@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"runtime"
+	"slices"
 	"sync"
 	"time"
 
@@ -110,6 +111,18 @@ func listenForHotkey() {
 	}
 }
 
+// sortedPasswordNames returns the names of saved passwords in ascending
+// order, so the picker lists entries in a stable order on every invocation
+// despite Go's randomized map iteration.
+func sortedPasswordNames(saved map[string]string) []string {
+	keys := make([]string, 0, len(saved))
+	for key := range saved {
+		keys = append(keys, key)
+	}
+	slices.Sort(keys)
+	return keys
+}
+
 func showPasswordsMenu() {
 	pwdObj, err := utils.GetPwdObjAfterCheckMaster()
 	if err != nil {
@@ -122,10 +135,7 @@ func showPasswordsMenu() {
 		return
 	}
 
-	keys := make([]string, 0, len(pwdObj.SavedPasswords))
-	for key := range pwdObj.SavedPasswords {
-		keys = append(keys, key)
-	}
+	keys := sortedPasswordNames(pwdObj.SavedPasswords)
 
 	selected, err := zenity.List("Select a password to copy:", keys, zenity.Title("Password Manager"))
 	if err != nil {
