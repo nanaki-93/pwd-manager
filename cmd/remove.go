@@ -4,7 +4,6 @@ Copyright © 2025 Marco Andreose <andreose.marco93@gmail.com>
 package cmd
 
 import (
-	"errors"
 	"fmt"
 
 	"github.com/nanaki-93/pwd-manager/internal/model"
@@ -18,9 +17,6 @@ var removeCmd = &cobra.Command{
 	Short: "A brief description of your command",
 	Run:   execRemoveCmd,
 }
-
-// errPasswordNotFound is returned (wrapped) when the requested key is absent.
-var errPasswordNotFound = errors.New("password not found")
 
 func removePassword(name string, savedPasswords map[string]string, save func() error) error {
 	if len(savedPasswords) == 0 {

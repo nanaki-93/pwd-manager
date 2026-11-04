@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -27,6 +28,32 @@ func runRemovePasswordWithCapture(t *testing.T, name string, saved map[string]st
 		})
 	})
 	return out, called, err
+}
+
+// Both commands must wrap the same sentinel, not just matching messages.
+// Before the fix their duplicate declarations prevent this test from building.
+func TestGetAndRemoveShareNotFoundError(t *testing.T) {
+	for _, name := range []string{"missing", ""} {
+		t.Run(name, func(t *testing.T) {
+			saved := map[string]string{"existing": "secret"}
+			getErr := handleGetOutput(name, saved, false)
+			removeErr := removePassword(name, saved, func() error {
+				t.Fatal("missing password must not trigger persistence")
+				return nil
+			})
+			for operation, err := range map[string]error{"get": getErr, "remove": removeErr} {
+				if !errors.Is(fmt.Errorf("caller context: %w", err), errPasswordNotFound) {
+					t.Fatalf("%s lost shared not-found identity: %v", operation, err)
+				}
+				if errors.Unwrap(err) != errPasswordNotFound {
+					t.Fatalf("%s wraps a different sentinel: %v", operation, err)
+				}
+			}
+			if len(saved) != 1 || saved["existing"] != "secret" {
+				t.Fatalf("missing lookups changed the store: %v", saved)
+			}
+		})
+	}
 }
 
 func TestRemovePasswordEmptyOrMissing(t *testing.T) {
