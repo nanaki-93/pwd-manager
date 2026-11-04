@@ -30,6 +30,20 @@ func TestExecMasterCmdTreatsEmptyConfirmationAsDecline(t *testing.T) {
 	}
 }
 
+func TestIsAffirmative(t *testing.T) {
+	cases := map[string]bool{
+		"Y": true, "y": true, "yes": true, "YES": true, "  YeS": true,
+		"\tY\t": true, "  yEs  ": true, "y\r": true,
+		"": false, "  ": false, "n": false, "N": false, "no": false, "NO": false,
+		"yeah": false, "yess": false, "y es": false,
+	}
+	for answer, want := range cases {
+		if got := isAffirmative(answer); got != want {
+			t.Fatalf("isAffirmative(%q) = %v, want %v", answer, got, want)
+		}
+	}
+}
+
 type errConfirmReader struct{ err error }
 
 func (f errConfirmReader) Read([]byte) (int, error) { return 0, f.err }

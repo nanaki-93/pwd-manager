@@ -92,11 +92,17 @@ func execMasterCmd(cmd *cobra.Command, args []string) {
 		updatePwd = answer
 	}
 
-	normalizedUpdate := strings.ToLower(strings.TrimSpace(updatePwd))
-	if isToInit || normalizedUpdate == "y" || normalizedUpdate == "yes" {
+	if isToInit || isAffirmative(updatePwd) {
 		savePassword(currPwdContent)
 	}
 
+}
+
+// isAffirmative reports whether a confirmation answer is "y" or "yes",
+// ignoring case and surrounding whitespace.
+func isAffirmative(answer string) bool {
+	normalized := strings.ToLower(strings.TrimSpace(answer))
+	return normalized == "y" || normalized == "yes"
 }
 
 // errMissingMasterHash reports an existing store without a master password

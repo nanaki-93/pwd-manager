@@ -421,38 +421,20 @@ func TestExecMasterCmdInitializesHashedPasswordWithoutKeyFile(t *testing.T) {
 
 func TestExecMasterCmdNormalizesUpdateConfirmation(t *testing.T) {
 	_ = withTempHome(t)
-	stubPasswordSequence(t,
-		"initial-secret",
-		"initial-secret", "updated-secret-1",
-		"updated-secret-1", "updated-secret-2",
-		"updated-secret-2", "updated-secret-3",
-		"updated-secret-3", "updated-secret-4",
-		"updated-secret-4", "updated-secret-5",
-		"updated-secret-5", "updated-secret-6",
-		"updated-secret-6", "updated-secret-7",
-	)
+	stubPasswordSequence(t, "initial-secret", "initial-secret", "updated-secret")
 	execMasterCmd(masterCmd, nil)
 
-	affirmatives := []struct{ input, wantSecret string }{
-		{"Y\n", "updated-secret-1"},
-		{"yes\n", "updated-secret-2"},
-		{"YES\n", "updated-secret-3"},
-		{"  YeS\n", "updated-secret-4"},
-		{"y\n", "updated-secret-5"},
-		{"\tY\t\n", "updated-secret-6"},
-		{"  yEs  \n", "updated-secret-7"},
-	}
-	for _, tc := range affirmatives {
-		feedStdinInput(t, tc.input, func() { execMasterCmd(masterCmd, nil) })
-		loaded, err := utils.GetPwdObj()
-		if err != nil || !utils.VerifyMasterPassword(loaded.MasterPassword, []byte(tc.wantSecret)) {
-			t.Fatalf("expected %q confirmation to update password to %q, err=%v", tc.input, tc.wantSecret, err)
-		}
+	// Answer normalization is table-tested in TestIsAffirmative; one rotation
+	// checks that a non-canonical affirmative answer reaches savePassword.
+	feedStdinInput(t, "  yEs  \n", func() { execMasterCmd(masterCmd, nil) })
+	loaded, err := utils.GetPwdObj()
+	if err != nil || !utils.VerifyMasterPassword(loaded.MasterPassword, []byte("updated-secret")) {
+		t.Fatalf("expected %q confirmation to update password, err=%v", "  yEs  \n", err)
 	}
 
 	feedStdinInput(t, "n\n", func() { execMasterCmd(masterCmd, nil) })
-	loaded, err := utils.GetPwdObj()
-	if err != nil || !utils.VerifyMasterPassword(loaded.MasterPassword, []byte("updated-secret-7")) {
+	loaded, err = utils.GetPwdObj()
+	if err != nil || !utils.VerifyMasterPassword(loaded.MasterPassword, []byte("updated-secret")) {
 		t.Fatalf("expected 'n' confirmation to keep existing password, err=%v", err)
 	}
 }
