@@ -14,6 +14,7 @@ import (
 	"strconv"
 	"strings"
 	"unicode"
+	"unicode/utf16"
 	"unicode/utf8"
 
 	"github.com/nanaki-93/pwd-manager/internal/utils"
@@ -84,6 +85,9 @@ func escapeListKey(k string) string {
 // invalid UTF-8 bytes so stored names and values cannot inject terminal escape
 // sequences. Printable text is returned unchanged.
 func sanitizeForTerminal(s string) string {
+	if isPrintableASCII(s) {
+		return s
+	}
 	var b strings.Builder
 	b.Grow(len(s))
 	for i := 0; i < len(s); {
@@ -100,6 +104,17 @@ func sanitizeForTerminal(s string) string {
 		i += size
 	}
 	return b.String()
+}
+
+// isPrintableASCII reports whether every byte of s is in 0x20..0x7E, so
+// sanitizeForTerminal can return s without allocating.
+func isPrintableASCII(s string) bool {
+	for i := 0; i < len(s); i++ {
+		if s[i] < 0x20 || s[i] > 0x7e {
+			return false
+		}
+	}
+	return true
 }
 
 // writeListJSONOutput streams the vault as an indented JSON object, one entry
@@ -136,13 +151,13 @@ func writeJSONEntries(bw *bufio.Writer, keys []string, savedPasswords map[string
 	}
 	sep := "{\n  "
 	for _, k := range keys {
-		key, err := json.Marshal(k)
+		key, err := marshalJSONString(k)
 		if err != nil {
 			return fmt.Errorf("marshal list json output: key: %w", err)
 		}
 		val := masked
 		if showPlaintext {
-			if val, err = json.Marshal(savedPasswords[k]); err != nil {
+			if val, err = marshalJSONString(savedPasswords[k]); err != nil {
 				return fmt.Errorf("marshal list json output: value: %w", err)
 			}
 		}
@@ -157,18 +172,70 @@ func writeJSONEntries(bw *bufio.Writer, keys []string, savedPasswords map[string
 	return nil
 }
 
-func runListCmd(out, errOut io.Writer, savedPasswords map[string]string, showPlaintext, asJSON bool) error {
-	if asJSON {
-		if err := writeListJSONOutput(out, savedPasswords, showPlaintext); err != nil {
-			if errOut != nil {
-				_, _ = fmt.Fprintf(errOut, "Error: %v\n", err)
-			}
-			return err
-		}
-		return nil
+// marshalJSONString encodes s like json.Marshal, then rewrites non-printable
+// non-ASCII runes (such as C1 controls U+0080–U+009F) as \uXXXX escapes so the
+// JSON output cannot carry raw terminal control sequences. ASCII-only output
+// is returned unchanged.
+func marshalJSONString(s string) ([]byte, error) {
+	enc, err := json.Marshal(s)
+	if err != nil {
+		return nil, err
 	}
-	return writeListOutput(out, savedPasswords, showPlaintext)
+	if !hasNonASCII(enc) {
+		return enc, nil
+	}
+	out := make([]byte, 0, len(enc)+16)
+	for i := 0; i < len(enc); {
+		r, size := utf8.DecodeRune(enc[i:])
+		switch {
+		case r < utf8.RuneSelf || unicode.IsPrint(r):
+			out = append(out, enc[i:i+size]...)
+		case r > 0xffff:
+			r1, r2 := utf16.EncodeRune(r)
+			out = fmt.Appendf(out, `\u%04x\u%04x`, r1, r2)
+		default:
+			out = fmt.Appendf(out, `\u%04x`, r)
+		}
+		i += size
+	}
+	return out, nil
 }
+
+func hasNonASCII(b []byte) bool {
+	for _, c := range b {
+		if c >= utf8.RuneSelf {
+			return true
+		}
+	}
+	return false
+}
+
+// runListCmd writes the vault in text or JSON form. In both modes a failure is
+// reported once on errOut as "Error: ..." and returned to the caller.
+func runListCmd(out, errOut io.Writer, savedPasswords map[string]string, showPlaintext, asJSON bool) error {
+	var err error
+	if asJSON {
+		err = writeListJSONOutput(out, savedPasswords, showPlaintext)
+	} else {
+		err = writeListOutput(out, savedPasswords, showPlaintext)
+	}
+	if err != nil {
+		reportListError(errOut, err)
+	}
+	return err
+}
+
+// reportListError writes err to errOut (stderr) regardless of output mode.
+func reportListError(errOut io.Writer, err error) {
+	if errOut != nil {
+		_, _ = fmt.Fprintf(errOut, "Error: %v\n", err)
+	}
+}
+
+// listExitFunc terminates the process after a list failure. Unlike
+// utils.ManageErrorAndExit it prints nothing, so the error already reported
+// on stderr is not repeated on stdout, where it would corrupt JSON output.
+var listExitFunc = os.Exit
 
 // errPlaintextNotTTY is returned when --show would write secrets to a
 // non-terminal (file, pipe, CI log) without --allow-non-tty.
@@ -200,18 +267,17 @@ func checkPlaintextOutputAllowed(out io.Writer, showPlaintext, allowNonTTY bool)
 
 func execListCmd(cmd *cobra.Command, args []string) {
 	if err := checkPlaintextOutputAllowed(cmd.OutOrStdout(), listShowFlag, listAllowNonTTYFlag); err != nil {
-		_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "Error: %v\n", err)
-		utils.ManageErrorAndExit(err)
+		reportListError(cmd.ErrOrStderr(), err)
+		listExitFunc(1)
 		return
 	}
 	pwdObj, err := utils.GetPwdObjAfterCheckMaster()
 	if err != nil {
-		if listJSONFlag {
-			_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "Error: %v\n", err)
-		}
-		utils.ManageErrorAndExit(err)
+		reportListError(cmd.ErrOrStderr(), err)
+		listExitFunc(1)
 		return
 	}
-	err = runListCmd(cmd.OutOrStdout(), cmd.ErrOrStderr(), pwdObj.SavedPasswords, listShowFlag, listJSONFlag)
-	utils.ManageErrorAndExit(err)
+	if err := runListCmd(cmd.OutOrStdout(), cmd.ErrOrStderr(), pwdObj.SavedPasswords, listShowFlag, listJSONFlag); err != nil {
+		listExitFunc(1)
+	}
 }
