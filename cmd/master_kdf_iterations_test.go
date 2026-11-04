@@ -26,7 +26,7 @@ func assertGenerateKeyReproducesRecordedKey(t *testing.T, saltData, salt []byte,
 	}
 	password := []byte("valid-master-secret")
 	utils.SetMasterKey(pbkdf2Key(password, salt, iterations, encryptionKeyLen, sha256.New))
-	original := model.PwdFile{MasterPassword: "pbkdf2-sha256$x", SavedPasswords: map[string]string{"mail": "c2VjcmV0"}}
+	original := model.PwdFile{MasterPassword: hashFixture(t, string(password)), SavedPasswords: map[string]string{"mail": "c2VjcmV0"}}
 	if err := utils.SaveFileErr(original, nil); err != nil {
 		t.Fatalf("write fixture store: %v", err)
 	}

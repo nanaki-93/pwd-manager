@@ -139,6 +139,10 @@ func readConfirmation(r io.Reader) (string, error) {
 	}
 }
 
+// errCurrentPasswordMismatch reports a wrong current master password; it ends
+// the command with a non-zero exit status so scripts can detect the failure.
+var errCurrentPasswordMismatch = errors.New("Passwords do not match")
+
 func savePassword(currPwdContent model.PwdFile) {
 	var currPassword []byte
 	var newPassword []byte
@@ -155,7 +159,7 @@ func savePassword(currPwdContent model.PwdFile) {
 		matched := utils.VerifyMasterPassword(currPwdContent.MasterPassword, currPassword)
 		clear(currPassword)
 		if !matched {
-			fmt.Println("Passwords do not match")
+			utils.ManageErrorAndExit(errCurrentPasswordMismatch)
 			return
 		}
 	}
@@ -208,16 +212,26 @@ func (p *pendingKey) install(content *model.PwdFile) error {
 	}
 	// The salt is written first so a saved store never depends on an unsaved
 	// salt; an existing salt keeps its bytes and only gains the parameter header.
-	if err := p.persistSalt(); err != nil {
+	// A failed save puts the previous salt file back, since the store on disk is
+	// still encrypted under the key that file records.
+	finishSalt, err := p.persistSalt()
+	if err != nil {
 		return err
 	}
 	utils.SetMasterKey(p.key)
 	if content == nil {
-		return nil
+		return finishSalt(false)
 	}
 	if err := saveStore(*content, nil); err != nil {
 		utils.SetMasterKey(nil)
-		return fmt.Errorf("save store with new master key: %w", err)
+		saveErr := fmt.Errorf("save store with new master key: %w", err)
+		if restoreErr := finishSalt(true); restoreErr != nil {
+			return errors.Join(saveErr, restoreErr)
+		}
+		return saveErr
+	}
+	if err := finishSalt(false); err != nil {
+		return err
 	}
 	return removeLegacyKeyFile()
 }
@@ -253,6 +267,11 @@ func generateKey(password ...[]byte) error {
 	content, err := utils.GetPwdObj()
 	switch {
 	case err == nil:
+		// The store may have been read through the legacy key file, so the
+		// password is checked against its hash before it is re-keyed.
+		if !utils.VerifyMasterPassword(content.MasterPassword, pwd) {
+			return fmt.Errorf("generate key: %w", errCurrentPasswordMismatch)
+		}
 		return pending.install(&content)
 	case errors.Is(err, os.ErrNotExist):
 		if err := pending.install(nil); err != nil {
@@ -277,12 +296,62 @@ func (p *pendingKey) wipe() {
 }
 
 // persistSalt writes new salts and salt files with outdated parameters with
-// the current KDF parameters.
-func (p *pendingKey) persistSalt() error {
+// the current KDF parameters. The returned function ends the write: with
+// restore it puts back the previous salt file bytes, or removes the file when
+// there was none; it always wipes the saved copy.
+func (p *pendingKey) persistSalt() (func(restore bool) error, error) {
 	if !p.writeSalt {
-		return nil
+		return func(bool) error { return nil }, nil
 	}
-	return writeKeySalt(p.salt)
+	finish, err := snapshotSaltFile()
+	if err != nil {
+		return nil, err
+	}
+	if err := writeKeySalt(p.salt); err != nil {
+		_ = finish(false)
+		return nil, err
+	}
+	return finish, nil
+}
+
+// snapshotSaltFile saves the current salt file so a later failure can restore
+// it. A path that is not a regular file is left for writeKeySalt to refuse.
+func snapshotSaltFile() (func(restore bool) error, error) {
+	saltPath, err := homeFilePath(keyDerivationSaltFile)
+	if err != nil {
+		return nil, err
+	}
+	info, err := os.Lstat(saltPath)
+	switch {
+	case errors.Is(err, os.ErrNotExist):
+		return func(restore bool) error {
+			if !restore {
+				return nil
+			}
+			if err := os.Remove(saltPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+				return fmt.Errorf("remove new salt file: %w", err)
+			}
+			return nil
+		}, nil
+	case err != nil:
+		return nil, fmt.Errorf("stat salt file: %w", err)
+	case !info.Mode().IsRegular():
+		return func(bool) error { return nil }, nil
+	}
+	previous, err := readRegularFileNoFollow(saltPath, keyDerivationSaltFile)
+	if err != nil {
+		return nil, err
+	}
+	return func(restore bool) error {
+		defer clear(previous)
+		if !restore {
+			return nil
+		}
+		if err := writeFileAtomic(saltPath, previous); err != nil {
+			return fmt.Errorf("restore previous salt file: %w", err)
+		}
+		return nil
+	}, nil
 }
 
 // prepareKey loads or creates the salt and derives the key for pwd without
