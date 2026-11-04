@@ -106,20 +106,20 @@ func ConcealedClipboardFlags(goos string) []string {
 	}
 }
 
-func Start() {
-	mainthread.Init(run)
+// Start runs the hotkey daemon on the main thread until it stops and returns
+// any startup failure, such as a hotkey that cannot be registered.
+func Start() error {
+	var err error
+	mainthread.Init(func() {
+		err = listenForHotkey()
+	})
+	return err
 }
 
-func run() {
-	listenForHotkey()
-}
-
-func listenForHotkey() {
+func listenForHotkey() error {
 	hk := hotkey.New([]hotkey.Modifier{hotkey.ModCtrl, hotkey.ModShift}, hotkey.KeyP)
-	err := hk.Register()
-	if err != nil {
-		fmt.Printf("Failed to register hotkey: %v\n", err)
-		return
+	if err := hk.Register(); err != nil {
+		return fmt.Errorf("register hotkey Ctrl+Shift+P: %w", err)
 	}
 	defer hk.Unregister()
 
@@ -128,6 +128,7 @@ func listenForHotkey() {
 	for range hk.Keydown() {
 		showPasswordsMenu()
 	}
+	return nil
 }
 
 // sortedPasswordNames returns the names of saved passwords in ascending

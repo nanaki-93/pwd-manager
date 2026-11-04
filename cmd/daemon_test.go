@@ -1,6 +1,31 @@
 package cmd
 
-import "testing"
+import (
+	"errors"
+	"testing"
+)
+
+func TestDaemonCmdSurfacesStartFailure(t *testing.T) {
+	orig := startDaemon
+	t.Cleanup(func() { startDaemon = orig })
+	startErr := errors.New("hotkey taken")
+	startDaemon = func() error { return startErr }
+
+	err := daemonCmd.RunE(daemonCmd, nil)
+	if !errors.Is(err, startErr) {
+		t.Fatalf("RunE error = %v, want wrapping %v", err, startErr)
+	}
+}
+
+func TestDaemonCmdReturnsNilWhenStartSucceeds(t *testing.T) {
+	orig := startDaemon
+	t.Cleanup(func() { startDaemon = orig })
+	startDaemon = func() error { return nil }
+
+	if err := daemonCmd.RunE(daemonCmd, nil); err != nil {
+		t.Fatalf("RunE error = %v, want nil", err)
+	}
+}
 
 func TestDaemonCmdRejectsArgs(t *testing.T) {
 	if daemonCmd.Args == nil {
