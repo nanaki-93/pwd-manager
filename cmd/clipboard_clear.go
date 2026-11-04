@@ -17,7 +17,32 @@ import (
 // on the clipboard before it is cleared.
 const addClipboardClearDelay = 10 * time.Second
 
+// Bounds on how long a copied password may stay on the clipboard. Delays
+// outside them (negative, or huge values from a misconfigured or tampered
+// config) are clamped so the password is always cleared promptly: a
+// non-positive delay clears it at once, a huge one after at most the max.
+const (
+	minClipboardClearDelay = 0
+	maxClipboardClearDelay = 5 * time.Minute
+)
+
+// clampClipboardClearDelay limits delay to
+// [minClipboardClearDelay, maxClipboardClearDelay].
+func clampClipboardClearDelay(delay time.Duration) time.Duration {
+	if delay < minClipboardClearDelay {
+		return minClipboardClearDelay
+	}
+	if delay > maxClipboardClearDelay {
+		return maxClipboardClearDelay
+	}
+	return delay
+}
+
 var (
+	// clipboardClearWaiter waits and clears the clipboard; a package
+	// variable so tests can observe the delay without blocking.
+	clipboardClearWaiter = clearClipboardAfter
+
 	clipboardReadAll = clipboard.ReadAll
 	// clipboardClearer waits, then clears pwd from the clipboard; a package
 	// variable so tests never block or touch the real clipboard.
@@ -37,13 +62,15 @@ func clearCopiedPasswordOnExit(pwd string) error {
 // clearCopiedPasswordAfter tells the user (on stderr) how long pwd stays on
 // the clipboard, keeps the CLI alive for delay or until a terminating signal
 // (SIGINT, SIGTERM, SIGHUP when the terminal closes, SIGQUIT), and then
-// clears pwd from the clipboard if it still holds it.
+// clears pwd from the clipboard if it still holds it. delay is clamped to
+// [minClipboardClearDelay, maxClipboardClearDelay].
 func clearCopiedPasswordAfter(pwd string, delay time.Duration) error {
+	delay = clampClipboardClearDelay(delay)
 	ctx, stop := signal.NotifyContext(context.Background(),
 		os.Interrupt, syscall.SIGTERM, syscall.SIGHUP, syscall.SIGQUIT)
 	defer stop()
 	fmt.Fprintf(os.Stderr, "Password copied to clipboard; it will be cleared in %v (press Ctrl+C to clear now).\n", delay)
-	return clearClipboardAfter(ctx, pwd, delay)
+	return clipboardClearWaiter(ctx, pwd, delay)
 }
 
 // clearClipboardAfter waits for delay or ctx cancellation, then clears the

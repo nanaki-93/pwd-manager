@@ -57,7 +57,7 @@ func init() {
 	getCmd.Flags().BoolVarP(&getCopyFlag, "copy", "c", false,
 		"Copy the password to the clipboard; the command waits --clear-after (or Ctrl+C) and then clears it if unchanged. Until cleared it is readable by other local processes and clipboard history tools")
 	getCmd.Flags().DurationVar(&getClearAfterFlag, "clear-after", addClipboardClearDelay,
-		"With --copy, how long the password stays on the clipboard before it is cleared")
+		"With --copy, how long the password stays on the clipboard before it is cleared (at most 5m)")
 	getCmd.Flags().BoolVar(&getRevealFlag, "reveal", false,
 		"Print the password even when standard output is not a terminal (pipes, files, logs). Without --copy the password is printed only to a terminal or with --reveal")
 	err := getCmd.MarkFlagRequired("name")

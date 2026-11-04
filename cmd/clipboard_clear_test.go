@@ -3,6 +3,7 @@
 package cmd
 
 import (
+	"context"
 	"os"
 	"os/signal"
 	"sync"
@@ -65,5 +66,44 @@ wait:
 	defer mu.Unlock()
 	if len(writes) != 1 || writes[0] != "" {
 		t.Fatalf("expected clipboard cleared with one empty write, got %q", writes)
+	}
+}
+
+// TestClearCopiedPasswordAfterClampsDelay checks that out-of-range delays
+// are clamped to [minClipboardClearDelay, maxClipboardClearDelay] before
+// the wait starts, so a huge configured delay cannot keep the password on
+// the clipboard indefinitely.
+func TestClearCopiedPasswordAfterClampsDelay(t *testing.T) {
+	tests := []struct {
+		name  string
+		delay time.Duration
+		want  time.Duration
+	}{
+		{"zero", 0, minClipboardClearDelay},
+		{"negative", -time.Hour, minClipboardClearDelay},
+		{"very large", time.Duration(1<<63 - 1), maxClipboardClearDelay},
+		{"just above max", maxClipboardClearDelay + time.Nanosecond, maxClipboardClearDelay},
+		{"in range", 30 * time.Second, 30 * time.Second},
+		{"tiny", time.Nanosecond, time.Nanosecond},
+	}
+	orig := clipboardClearWaiter
+	t.Cleanup(func() { clipboardClearWaiter = orig })
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var got time.Duration
+			clipboardClearWaiter = func(_ context.Context, pwd string, delay time.Duration) error {
+				if pwd != "s3cr3t" {
+					t.Errorf("waiter got pwd %q", pwd)
+				}
+				got = delay
+				return nil
+			}
+			if err := clearCopiedPasswordAfter("s3cr3t", tt.delay); err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if got != tt.want {
+				t.Fatalf("delay %v: waited %v, want %v", tt.delay, got, tt.want)
+			}
+		})
 	}
 }
