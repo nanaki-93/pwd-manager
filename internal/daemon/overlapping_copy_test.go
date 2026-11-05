@@ -30,7 +30,11 @@ func TestCopyPasswordToClipboard_OverlappingCopyOlderWriteLandsLastIsCleared(t *
 
 	oldDone := make(chan error, 1)
 	go func() { oldDone <- copyPasswordToClipboard("old-secret") }()
-	<-oldWriteStarted
+	select {
+	case <-oldWriteStarted:
+	case err := <-oldDone:
+		t.Fatalf("older copy returned before writing the clipboard: %v", err)
+	}
 
 	if err := copyPasswordToClipboard("new-secret"); err != nil {
 		t.Fatalf("unexpected error from newer copy: %v", err)
