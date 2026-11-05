@@ -212,17 +212,24 @@ func hasNonASCII(b []byte) bool {
 
 // runListCmd writes the vault in text or JSON form. In both modes a failure is
 // reported once on errOut as "Error: ..." and returned to the caller.
-func runListCmd(out, errOut io.Writer, savedPasswords map[string]string, showPlaintext, asJSON bool) error {
-	var err error
-	if asJSON {
-		err = writeListJSONOutput(out, savedPasswords, showPlaintext)
-	} else {
-		err = writeListOutput(out, savedPasswords, showPlaintext)
+// Plaintext output to a non-terminal is refused unless allowNonTTY is set.
+func runListCmd(out, errOut io.Writer, savedPasswords map[string]string, showPlaintext, asJSON, allowNonTTY bool) error {
+	err := checkPlaintextOutputAllowed(out, showPlaintext, allowNonTTY)
+	if err == nil {
+		err = writeList(out, savedPasswords, showPlaintext, asJSON)
 	}
 	if err != nil {
 		reportListError(errOut, err)
 	}
 	return err
+}
+
+// writeList writes the vault to out in JSON or text form.
+func writeList(out io.Writer, savedPasswords map[string]string, showPlaintext, asJSON bool) error {
+	if asJSON {
+		return writeListJSONOutput(out, savedPasswords, showPlaintext)
+	}
+	return writeListOutput(out, savedPasswords, showPlaintext)
 }
 
 // reportListError writes err to errOut (stderr) regardless of output mode.
@@ -277,7 +284,7 @@ func execListCmd(cmd *cobra.Command, args []string) {
 		listExitFunc(1)
 		return
 	}
-	if err := runListCmd(cmd.OutOrStdout(), cmd.ErrOrStderr(), pwdObj.SavedPasswords, listShowFlag, listJSONFlag); err != nil {
+	if err := runListCmd(cmd.OutOrStdout(), cmd.ErrOrStderr(), pwdObj.SavedPasswords, listShowFlag, listJSONFlag, listAllowNonTTYFlag); err != nil {
 		listExitFunc(1)
 	}
 }
