@@ -36,9 +36,10 @@ func TestParseGitleaksRunScriptIndentBoundaries(t *testing.T) {
 // child test process rather than replacing the extractor's caller contract.
 func TestExtractGitleaksRunScriptFatalNamesFile(t *testing.T) {
 	const fixtureEnv = "LEFTHOOK_EXTRACTION_FATAL_FIXTURE"
+	const returnedSentinel = "extractor returned instead of calling Fatalf"
 	if path := os.Getenv(fixtureEnv); path != "" {
 		extractGitleaksRunScript(t, path)
-		t.Fatal("extractor returned instead of calling Fatalf")
+		t.Fatal(returnedSentinel)
 	}
 	for _, yaml := range []string{
 		"commands:\n  gitleaks:\n    glob: '*'\n",
@@ -60,6 +61,9 @@ func TestExtractGitleaksRunScriptFatalNamesFile(t *testing.T) {
 		want := "extract gitleaks run script from " + path + ":"
 		if !strings.Contains(string(output), want) {
 			t.Fatalf("child output = %s, want diagnostic containing %q", output, want)
+		}
+		if strings.Contains(string(output), returnedSentinel) {
+			t.Fatalf("child output = %s, want extractor to stop via Fatalf, not return", output)
 		}
 	}
 }
