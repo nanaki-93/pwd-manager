@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"slices"
 	"testing"
 
 	"github.com/spf13/pflag"
@@ -53,7 +54,7 @@ func TestGetAndAddCopyFlagParsingLeavesSharedFlagSetsUntouched(t *testing.T) {
 		if a.parsed != b.parsed {
 			t.Errorf("%s flag set Parsed() changed from %v to %v", cmdName, b.parsed, a.parsed)
 		}
-		if len(a.args) != len(b.args) {
+		if !slices.Equal(a.args, b.args) {
 			t.Errorf("%s flag set Args() changed from %v to %v", cmdName, b.args, a.args)
 		}
 		for flagName, bs := range b.states {
