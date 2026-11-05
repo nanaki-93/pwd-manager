@@ -3,7 +3,9 @@ package daemon
 import (
 	"errors"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 )
 
 // A failed copy cancels the earlier password's pending clear, so it must
@@ -98,13 +100,23 @@ func TestFailedCopyDuringInFlightCopyStillClearsIt(t *testing.T) {
 		}
 		return h.write(text)
 	}
+	var releaseOnce sync.Once
+	releaseOld := func() { releaseOnce.Do(func() { close(release) }) }
+	defer releaseOld()
 	oldDone := make(chan error, 1)
 	go func() { oldDone <- copyPasswordToClipboard("old-secret") }()
 	<-started
-	if err := copyPasswordToClipboard("new-secret"); !errors.Is(err, writeErr) {
-		t.Fatalf("expected write error, got %v", err)
+	newDone := make(chan error, 1)
+	go func() { newDone <- copyPasswordToClipboard("new-secret") }()
+	select {
+	case err := <-newDone:
+		if !errors.Is(err, writeErr) {
+			t.Fatalf("expected write error, got %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("second copy blocked waiting for the in-flight copy; it must fail without waiting")
 	}
-	close(release)
+	releaseOld()
 	if err := <-oldDone; err != nil {
 		t.Fatalf("unexpected error from older copy: %v", err)
 	}
