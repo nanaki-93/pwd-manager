@@ -1,12 +1,10 @@
 package cmd
 
 import (
-	"crypto/sha256"
 	"hash"
 	"os"
 	"testing"
 
-	"github.com/nanaki-93/pwd-manager/internal/utils"
 	"golang.org/x/crypto/pbkdf2"
 )
 
@@ -35,13 +33,11 @@ func useRealKDF(t *testing.T) {
 
 // TestMain stops tests from blocking on, or touching, the real clipboard when
 // `add --copy` schedules clearing; tests that cover clearing stub it themselves.
-// It also scales PBKDF2 work down, which dominated the package's test time.
+// It also scales cmd's own PBKDF2 work down; internal/utils exposes no KDF
+// override outside its own tests, so derivations there run at full cost.
 func TestMain(m *testing.M) {
 	clipboardClearer = func(string) error { return nil }
 	clipboardReadAll = func() (string, error) { return "", nil }
 	pbkdf2Key = fastPBKDF2Key
-	utils.SetKDFForTesting(func(password, salt []byte, iter, keyLen int) []byte {
-		return fastPBKDF2Key(password, salt, iter, keyLen, sha256.New)
-	})
 	os.Exit(m.Run())
 }
