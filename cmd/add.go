@@ -34,7 +34,7 @@ func init() {
 
 func readPwdName(r io.Reader) (string, error) {
 	reader := bufio.NewReader(r)
-	line, err := reader.ReadString('\n')
+	line, err := readBoundedLine(reader, maxPwdNameLineBytes)
 	if err != nil && !errors.Is(err, io.EOF) {
 		return "", fmt.Errorf("read password name: %w", err)
 	}
@@ -51,8 +51,31 @@ func readPwdName(r io.Reader) (string, error) {
 	return pwdName, nil
 }
 
+// readBoundedLine reads up to and including the next '\n', consuming at most
+// limit bytes so an endless line cannot exhaust memory. Bytes after the
+// newline stay buffered in reader. A line longer than limit is rejected with
+// errInvalidPwdName; at EOF it returns what was read with io.EOF.
+func readBoundedLine(reader *bufio.Reader, limit int) (string, error) {
+	var line strings.Builder
+	for line.Len() < limit {
+		b, err := reader.ReadByte()
+		if err != nil {
+			return line.String(), err
+		}
+		line.WriteByte(b)
+		if b == '\n' {
+			return line.String(), nil
+		}
+	}
+	return "", fmt.Errorf("%w: line exceeds %d bytes", errInvalidPwdName, limit)
+}
+
 // maxPwdNameLen bounds the length, in characters, of an entry name.
 const maxPwdNameLen = 128
+
+// maxPwdNameLineBytes bounds the bytes read for a name line: the longest
+// valid name in UTF-8 plus a "\r\n" terminator.
+const maxPwdNameLineBytes = maxPwdNameLen*utf8.UTFMax + len("\r\n")
 
 // errInvalidPwdName reports an entry name that is too long, not valid UTF-8
 // or contains non-printable characters such as control or escape bytes.
