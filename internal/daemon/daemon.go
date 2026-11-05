@@ -33,9 +33,9 @@ const DefaultClipboardClearTimeout = 10 * time.Second
 // plan9 or any GOOS other than darwin, linux and windows). Without hints,
 // clipboard history tools may persist the secret, so it is cleared sooner.
 //
-// Coverage note: on linux only the KDE hint (x-kde-passwordManagerHint) is
-// applied; clipboard managers on other desktops may ignore it and record the
-// entry in their history.
+// Coverage note: hints are written natively on darwin (cgo) and windows only.
+// On linux no native X11/Wayland writer exists yet, so the KDE hint
+// (x-kde-passwordManagerHint) is not attached and this cap applies there too.
 const UnhintedClipboardClearTimeout = 5 * time.Second
 
 var (
@@ -78,11 +78,12 @@ var (
 	clipboardActivePwd string
 )
 
-// markClipboardConcealed attaches concealment hints to the clipboard entry.
-// writeClipboard only receives the plain string, so no hints are attached by
-// default (nil); copyPasswordToClipboard then treats the platform as unhinted
-// and caps retention at UnhintedClipboardClearTimeout.
-var markClipboardConcealed func(flags []string)
+// writeConcealedClipboard writes a password together with its concealment
+// flags in one native clipboard operation, so clipboard monitors never see
+// the secret without its hints. It is nil where no native writer exists
+// (see nativeConcealedClipboardWriter); copyPasswordToClipboard then writes
+// the password unhinted and caps retention at UnhintedClipboardClearTimeout.
+var writeConcealedClipboard = nativeConcealedClipboardWriter()
 
 // ConcealedClipboardFlags returns platform-specific clipboard metadata hints
 // used to mark secret entries as concealed and transient where supported.
@@ -187,9 +188,9 @@ func showPasswordsMenu() {
 	}
 }
 
-// copyPasswordToClipboard writes pwd to the system clipboard, applies
-// platform-specific concealed/transient metadata hints when a hint applier is
-// installed (otherwise the shorter unhinted retention is used), and schedules automatic
+// copyPasswordToClipboard writes pwd to the system clipboard, together with
+// platform-specific concealed/transient hints when a native concealed writer
+// exists (otherwise the shorter unhinted retention is used), and schedules automatic
 // clearing after clipboardClearTimeout if the clipboard still holds pwd. A
 // non-positive clipboardClearTimeout is reported and replaced by
 // DefaultClipboardClearTimeout, so a copied password is always cleared.
@@ -209,7 +210,7 @@ func copyPasswordToClipboard(pwd string) error {
 		clipboardTimer.Stop()
 		clipboardTimer = nil
 	}
-	writeFn := writeClipboard
+	writeFn, flags := passwordWriterLocked()
 	clipboardMu.Unlock()
 	clipboardClearMu.Unlock()
 
@@ -225,20 +226,10 @@ func copyPasswordToClipboard(pwd string) error {
 		clipboardMu.Unlock()
 		return nil
 	}
-	markFn := markClipboardConcealed
-	goos := clipboardOS
 	timeout := clipboardClearTimeout
 	scheduleFn := afterFunc
 	report := reportClipboardClearFailure
 	clipboardMu.Unlock()
-
-	flags := ConcealedClipboardFlags(goos)
-	if markFn == nil {
-		// No hint can be attached, so the entry is effectively unhinted.
-		flags = nil
-	} else {
-		markFn(flags)
-	}
 
 	if timeout <= 0 {
 		// Automatic clearing cannot be disabled: a non-positive timeout is
@@ -260,6 +251,19 @@ func copyPasswordToClipboard(pwd string) error {
 	})
 
 	return nil
+}
+
+// passwordWriterLocked returns the clipboard write for a password and the
+// concealment flags it attaches in the same write: the native concealed
+// writer with the platform's flags when both exist, otherwise the plain
+// writer and no flags. The caller holds clipboardMu.
+func passwordWriterLocked() (func(string) error, []string) {
+	flags := ConcealedClipboardFlags(clipboardOS)
+	if writeConcealedClipboard == nil || len(flags) == 0 {
+		return writeClipboard, nil
+	}
+	writeConcealed := writeConcealedClipboard
+	return func(pwd string) error { return writeConcealed(pwd, flags) }, flags
 }
 
 // clearAfterFailedWrite runs a best-effort verified clear after writing a new

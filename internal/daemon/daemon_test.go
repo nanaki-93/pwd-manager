@@ -17,7 +17,8 @@ func resetClipboardTestState(t *testing.T) {
 	origAfter := afterFunc
 	origTimeout := clipboardClearTimeout
 	origOS := clipboardOS
-	origMarkConcealed := markClipboardConcealed
+	origConcealedWrite := writeConcealedClipboard
+	writeConcealedClipboard = nil // never touch the real clipboard natively
 	origReport := reportClipboardClearFailure
 	origRetryDelays := clipboardClearRetryDelays
 	reportClipboardClearFailure = func(error) {}
@@ -34,7 +35,7 @@ func resetClipboardTestState(t *testing.T) {
 		afterFunc = origAfter
 		clipboardClearTimeout = origTimeout
 		clipboardOS = origOS
-		markClipboardConcealed = origMarkConcealed
+		writeConcealedClipboard = origConcealedWrite
 		reportClipboardClearFailure = origReport
 		clipboardClearRetryDelays = origRetryDelays
 	})
@@ -54,10 +55,8 @@ func TestCopyPasswordToClipboard_WriteError(t *testing.T) {
 		tm.Stop()
 		return tm
 	}
-	concealedMarked := false
-	markClipboardConcealed = func(flags []string) {
-		concealedMarked = true
-	}
+	clipboardOS = "darwin"
+	writeConcealedClipboard = func(string, []string) error { return expectedErr }
 
 	err := copyPasswordToClipboard("secret123")
 	if !errors.Is(err, expectedErr) {
@@ -65,9 +64,6 @@ func TestCopyPasswordToClipboard_WriteError(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "write password to clipboard:") {
 		t.Fatalf("expected wrapped error context, got %v", err)
-	}
-	if concealedMarked {
-		t.Fatal("expected concealed clipboard flags not to be marked on write error")
 	}
 	if timerScheduled {
 		t.Fatal("expected expiration timer not to be scheduled on write error")
@@ -89,7 +85,7 @@ func TestCopyPasswordToClipboard_ClearsMatchingSecretAfterTimeout(t *testing.T) 
 	var scheduledFn func()
 	var scheduledDuration time.Duration
 	clipboardClearTimeout = 15 * time.Second
-	clipboardOS, markClipboardConcealed = "linux", func([]string) {}
+	clipboardOS, writeConcealedClipboard = "linux", forwardConcealedWrite
 	afterFunc = func(d time.Duration, f func()) *time.Timer {
 		scheduledDuration = d
 		scheduledFn = f
@@ -148,12 +144,10 @@ func TestCopyPasswordToClipboard_DefaultRetentionAndConcealedFlagsWorkflow(t *te
 
 			clipboardOS = tc.goos
 			var appliedFlags []string
-			markCalled := false
-			markClipboardConcealed = func(flags []string) {
-				markCalled = true
-				if flags != nil {
-					appliedFlags = append([]string(nil), flags...)
-				}
+			writeConcealedClipboard = func(text string, flags []string) error {
+				appliedFlags = append([]string(nil), flags...)
+				currentClipboard = text
+				return nil
 			}
 
 			var scheduledDuration time.Duration
@@ -168,9 +162,6 @@ func TestCopyPasswordToClipboard_DefaultRetentionAndConcealedFlagsWorkflow(t *te
 
 			if err := copyPasswordToClipboard("top-secret"); err != nil {
 				t.Fatalf("unexpected error: %v", err)
-			}
-			if !markCalled {
-				t.Fatal("expected markClipboardConcealed to be called")
 			}
 			if !reflect.DeepEqual(appliedFlags, tc.wantFlags) {
 				t.Fatalf("expected concealed flags %v, got %v", tc.wantFlags, appliedFlags)
@@ -249,7 +240,7 @@ func TestCopyPasswordToClipboard_UnhintedPlatformsUseShorterRetention(t *testing
 		t.Run(tc.goos+"/"+tc.configured.String(), func(t *testing.T) {
 			resetClipboardTestState(t)
 			writeClipboard = func(string) error { return nil }
-			clipboardOS, markClipboardConcealed = tc.goos, func([]string) {}
+			clipboardOS, writeConcealedClipboard = tc.goos, forwardConcealedWrite
 			clipboardClearTimeout = tc.configured
 			var got time.Duration
 			afterFunc = func(d time.Duration, f func()) *time.Timer {
@@ -410,8 +401,9 @@ func TestCopyPasswordToClipboard_NonPositiveTimeoutUsesDefaultAndWarns(t *testin
 			clipboardOS = "linux"
 
 			var appliedFlags []string
-			markClipboardConcealed = func(flags []string) {
+			writeConcealedClipboard = func(text string, flags []string) error {
 				appliedFlags = append([]string(nil), flags...)
+				return writeClipboard(text)
 			}
 
 			var scheduledFn func()
@@ -636,12 +628,13 @@ type concurrentClipboardHarness struct {
 
 func newConcurrentClipboardHarness() *concurrentClipboardHarness {
 	h := &concurrentClipboardHarness{}
-	writeClipboard = h.write
+	clipboardOS, writeClipboard = "windows", h.write
 	readClipboard = h.read
-	markClipboardConcealed = func(flags []string) {
+	writeConcealedClipboard = func(text string, _ []string) error {
 		h.mu.Lock()
 		h.markCount++
 		h.mu.Unlock()
+		return writeClipboard(text)
 	}
 	afterFunc = func(d time.Duration, f func()) *time.Timer {
 		h.mu.Lock()
@@ -740,8 +733,8 @@ func TestCopyPasswordToClipboard_SlowWriteDoesNotHoldLockAndCancelsStaleCopy(t *
 	activeCallback := h.callbacks[0]
 	h.mu.Unlock()
 
-	if gotMarks != 1 {
-		t.Fatalf("expected markClipboardConcealed only for active token, got %d calls", gotMarks)
+	if gotMarks != 2 {
+		t.Fatalf("expected both password writes to carry concealment hints, got %d", gotMarks)
 	}
 	if gotCallbacks != 1 {
 		t.Fatalf("expected only 1 timer scheduled (stale copy cancelled), got %d", gotCallbacks)
