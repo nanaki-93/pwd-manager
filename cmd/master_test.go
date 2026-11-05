@@ -15,7 +15,7 @@ import (
 )
 
 func init() {
-	utils.SetExitFunc(func(int) {})
+	setUtilsExit(func(int) {})
 }
 
 func withTempHome(t *testing.T) string {
@@ -24,7 +24,7 @@ func withTempHome(t *testing.T) string {
 	if err != nil {
 		t.Fatalf("failed to get working directory: %v", err)
 	}
-	revExit := utils.SetExitFunc(func(int) {})
+	revExit := setUtilsExit(func(int) {})
 	t.Cleanup(func() {
 		utils.SetMasterKey(nil)
 		revExit()
@@ -52,7 +52,7 @@ func writeTestKey(t *testing.T, tmpHome string, b byte) string {
 func captureExit(t *testing.T) *int {
 	t.Helper()
 	var count int
-	restore := utils.SetExitFunc(func(code int) {
+	restore := setUtilsExit(func(code int) {
 		if code != 0 {
 			count++
 		}
@@ -101,7 +101,7 @@ func feedStdinInput(t *testing.T, input string, fn func()) {
 func stubPasswordSequence(t *testing.T, inputs ...string) {
 	t.Helper()
 	idx := 0
-	restore := utils.SetReadPasswordStdin(func() ([]byte, error) {
+	restore := setUtilsReadPassword(func() ([]byte, error) {
 		if idx >= len(inputs) {
 			return nil, errors.New("unexpected password prompt")
 		}
@@ -328,14 +328,16 @@ func TestGetPwdObjAfterCheckMasterRejectsMismatchedMasterPassword(t *testing.T) 
 	if err != nil {
 		t.Fatalf("failed to hash master password: %v", err)
 	}
-	utils.SaveFile(model.PwdFile{MasterPassword: hashed}, nil)
+	if err := utils.SaveFileErr(model.PwdFile{MasterPassword: hashed}, nil); err != nil {
+		t.Fatalf("SaveFileErr: %v", err)
+	}
 
 	got, err := utils.GetPwdObjAfterCheckMaster()
 	if err == nil || got.MasterPassword != "" {
 		t.Fatalf("expected error and empty PwdFile on verification failure, got %+v, err=%v", got, err)
 	}
 
-	restoreReader := utils.SetReadPasswordStdin(func() ([]byte, error) {
+	restoreReader := setUtilsReadPassword(func() ([]byte, error) {
 		return []byte("non-empty-master-secret"), nil
 	})
 	defer restoreReader()
@@ -395,15 +397,10 @@ func TestSaveFileReturnsErrorWhenKeyMissing(t *testing.T) {
 
 func TestSaveFileRejectsUpstreamAndCipherErrors(t *testing.T) {
 	tmpHome := withTempHome(t)
-	exitCount := captureExit(t)
 
 	inErr := errors.New("upstream failure")
 	if err := utils.SaveFileErr(model.PwdFile{MasterPassword: "hash"}, inErr); !errors.Is(err, inErr) {
 		t.Fatalf("expected SaveFileErr to return input error %v, got %v", inErr, err)
-	}
-	utils.SaveFile(model.PwdFile{MasterPassword: "hash"}, inErr)
-	if *exitCount != 1 {
-		t.Fatalf("expected ManageErrorAndExit to be triggered once for input error, got %d", *exitCount)
 	}
 
 	keyPath := filepath.Join(tmpHome, utils.PwdFileKey)
@@ -446,7 +443,9 @@ func TestSaveFileAndGetPwdObjStorageAndRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to hash password: %v", err)
 	}
-	utils.SaveFile(model.PwdFile{MasterPassword: expectedHash}, nil)
+	if err := utils.SaveFileErr(model.PwdFile{MasterPassword: expectedHash}, nil); err != nil {
+		t.Fatalf("SaveFileErr: %v", err)
+	}
 	loaded, err := utils.GetPwdObj()
 	if err != nil || loaded.MasterPassword != expectedHash {
 		t.Fatalf("loaded MasterPassword mismatch: got %q, want %q (err=%v)", loaded.MasterPassword, expectedHash, err)
@@ -490,7 +489,7 @@ func TestSavePasswordRejectsNilReaderSlice(t *testing.T) {
 		return len(buf), nil
 	}
 
-	restoreReader := utils.SetReadPasswordStdin(func() ([]byte, error) { return nil, nil })
+	restoreReader := setUtilsReadPassword(func() ([]byte, error) { return nil, nil })
 	defer restoreReader()
 
 	exitCount := captureExit(t)
@@ -567,7 +566,7 @@ func TestSavePasswordZeroesPasswordBuffersAndHeapSnapshot(t *testing.T) {
 	seeds := []byte{11, 29, 11, 47, 11, 83}
 	lens := []int{24, 24, 24, 5, 24, 24}
 	idx := 0
-	restoreReader := utils.SetReadPasswordStdin(func() ([]byte, error) {
+	restoreReader := setUtilsReadPassword(func() ([]byte, error) {
 		if idx >= len(seeds) {
 			return nil, errors.New("unexpected password prompt")
 		}
@@ -612,7 +611,7 @@ func TestSavePasswordAbortsWhenEncryptionFails(t *testing.T) {
 
 func TestManageErrorAndExitTerminatesOnError(t *testing.T) {
 	exitCode := 0
-	restore := utils.SetExitFunc(func(code int) { exitCode = code })
+	restore := setUtilsExit(func(code int) { exitCode = code })
 	defer restore()
 
 	utils.ManageErrorAndExit(nil)

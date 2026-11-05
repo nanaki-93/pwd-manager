@@ -11,6 +11,9 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"os"
 	"path/filepath"
 	"strings"
@@ -19,6 +22,30 @@ import (
 	"github.com/nanaki-93/pwd-manager/internal/model"
 	"golang.org/x/crypto/pbkdf2"
 )
+
+// Pin the requested production-code deletion without calling the obsolete API.
+func TestUtilsRemovesUnusedFunctions(t *testing.T) {
+	file, err := parser.ParseFile(token.NewFileSet(), "utils.go", nil, 0)
+	if err != nil {
+		t.Fatalf("parse utils.go: %v", err)
+	}
+	declared := make(map[string]bool)
+	for _, decl := range file.Decls {
+		if fn, ok := decl.(*ast.FuncDecl); ok && fn.Recv == nil {
+			declared[fn.Name.Name] = true
+		}
+	}
+	for _, name := range []string{
+		"SetExitFunc", "SetReadPasswordStdin", "chdirHome",
+		"GoToHomeDir", "readPwdFile", "SaveFile",
+	} {
+		t.Run(name, func(t *testing.T) {
+			if declared[name] {
+				t.Errorf("unused function %s remains in utils.go", name)
+			}
+		})
+	}
+}
 
 func TestHashMasterPassword(t *testing.T) {
 	password := []byte("master-password-test")

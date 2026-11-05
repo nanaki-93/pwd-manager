@@ -11,3 +11,17 @@ func SetKDFForTesting(fn func(password, salt []byte, iter, keyLen int) []byte) f
 		kdf = prev
 	}
 }
+
+// SetExitFunc overrides ExitFunc and returns a restore callback.
+func SetExitFunc(fn func(int)) func() {
+	prev := ExitFunc
+	ExitFunc = fn
+	return func() { ExitFunc = prev }
+}
+
+// SetReadPasswordStdin overrides ReadPasswordStdin and returns a restore callback.
+func SetReadPasswordStdin(fn func() ([]byte, error)) func() {
+	prev := ReadPasswordStdin
+	ReadPasswordStdin = fn
+	return func() { ReadPasswordStdin = prev }
+}

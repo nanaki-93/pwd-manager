@@ -5,7 +5,6 @@ import (
 	"testing"
 
 	"github.com/nanaki-93/pwd-manager/internal/model"
-	"github.com/nanaki-93/pwd-manager/internal/utils"
 )
 
 // A wrong current password must end the command with a non-zero exit status,
@@ -14,7 +13,7 @@ func TestSavePasswordWrongCurrentPasswordExitsNonZero(t *testing.T) {
 	withTempHome(t)
 	exitCount := captureExit(t)
 	prompts := 0
-	restorePrompt := utils.SetReadPasswordStdin(func() ([]byte, error) {
+	restorePrompt := setUtilsReadPassword(func() ([]byte, error) {
 		prompts++
 		return []byte("wrong-current-password"), nil
 	})
