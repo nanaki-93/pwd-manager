@@ -53,7 +53,22 @@ func TestRotationPersistsSaltAndRetainsLegacyKeyBeforeSave(t *testing.T) {
 			} else if err != nil {
 				t.Fatalf("rotation failed: %v", err)
 			}
+			assertLegacyKeyAfterSave(t, home, legacy, fail)
 		})
+	}
+}
+
+// assertLegacyKeyAfterSave checks the legacy key file is kept unchanged after
+// a failed save and removed after a successful one.
+func assertLegacyKeyAfterSave(t *testing.T, home string, legacy []byte, saveFailed bool) {
+	t.Helper()
+	got, err := os.ReadFile(filepath.Join(home, utils.PwdFileKey))
+	if saveFailed {
+		if err != nil || !bytes.Equal(got, legacy) {
+			t.Fatalf("legacy key changed after failed save: %v", err)
+		}
+	} else if !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("legacy key kept after successful save: %v", err)
 	}
 }
 
