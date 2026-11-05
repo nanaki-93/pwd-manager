@@ -3,7 +3,8 @@ pre-commit:
   parallel: true
   commands:
     whitespace:
-      glob: "*.{go,ts,tsx,js,py,kt,java,md,yml,yaml,json,toml}"
+      # md is excluded: Markdown uses two trailing spaces as a hard line break.
+      glob: "*.{go,ts,tsx,js,py,kt,java,yml,yaml,json,toml}"
       run: git diff --cached --check -- {staged_files}
     gitleaks:
       run: |
