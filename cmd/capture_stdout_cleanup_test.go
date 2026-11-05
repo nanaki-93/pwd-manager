@@ -80,6 +80,12 @@ func TestCaptureRemoveStdoutEmpty(t *testing.T) {
 	if os.Stdout != original {
 		t.Error("stdout was not restored")
 	}
+	if writer == nil {
+		t.Fatal("callback did not run: capture writer was never assigned")
+	}
+	if writer == original {
+		t.Fatal("callback saw the original stdout: stdout was not swapped")
+	}
 	if _, err := writer.Stat(); err == nil {
 		t.Error("capture writer remains open after normal return")
 	}
