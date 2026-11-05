@@ -253,42 +253,6 @@ func validateMasterPassword(password []byte) error {
 	return nil
 }
 
-func generateKey(password ...[]byte) error {
-	var pwd []byte
-	if len(password) > 0 {
-		pwd = password[0]
-	}
-	// The key must match data already encrypted under the salt file, so it is
-	// derived with the recorded iterations and the salt header is kept.
-	pending, err := prepareKey(pwd, false)
-	if err != nil {
-		return err
-	}
-	defer pending.wipe()
-	if err := checkLegacyKeyFile(); err != nil {
-		return err
-	}
-	// A store that may depend on the legacy key file is migrated to the new key
-	// before that file is removed; one that cannot be read now keeps the file.
-	content, err := utils.GetPwdObj()
-	switch {
-	case err == nil:
-		// The store may have been read through the legacy key file, so the
-		// password is checked against its hash before it is re-keyed.
-		if !utils.VerifyMasterPassword(content.MasterPassword, pwd) {
-			return fmt.Errorf("generate key: %w", errCurrentPasswordMismatch)
-		}
-		return pending.install(&content)
-	case errors.Is(err, os.ErrNotExist):
-		if err := pending.install(nil); err != nil {
-			return err
-		}
-		return removeLegacyKeyFile()
-	default:
-		return pending.install(nil)
-	}
-}
-
 // pendingKey is a derived key that has not been put into use yet.
 type pendingKey struct {
 	salt      []byte

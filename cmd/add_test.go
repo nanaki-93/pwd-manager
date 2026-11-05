@@ -387,8 +387,7 @@ func TestCaptureStdoutDrainsOutputLargerThanPipeBuffer(t *testing.T) {
 }
 
 func TestSavePasswordWhenMasterPasswordEmpty(t *testing.T) {
-	// Required: generateKey -> prepareKey -> utils.GoToHomeDir chdirs into
-	// tmpHome, which t.TempDir removes; restore the original working directory.
+	// Restore the original working directory in case savePassword changes it.
 	origWd, err := os.Getwd()
 	if err != nil {
 		t.Fatalf("failed to get working directory: %v", err)
@@ -402,7 +401,6 @@ func TestSavePasswordWhenMasterPasswordEmpty(t *testing.T) {
 	stubPasswordSequence(t, "valid-master-password")
 
 	output := captureStdout(t, func() {
-		generateKey()
 		savePassword(model.PwdFile{MasterPassword: ""})
 	})
 	if strings.Contains(output, "Enter your current password:") {

@@ -45,21 +45,6 @@ func TestDeriveKeyUsesStrongPBKDF2(t *testing.T) {
 	}
 }
 
-func TestGenerateKeyStoresKDFParametersMeetingMinimum(t *testing.T) {
-	tmpHome := withTempHome(t)
-	stubFixedRandSalt(t, 0x3d, nil)
-	if err := generateKey([]byte("valid-master-secret")); err != nil {
-		t.Fatalf("generateKey: %v", err)
-	}
-	iter, salt := readStoredSaltParams(t, tmpHome)
-	if iter < minAcceptedKDFIterations {
-		t.Fatalf("stored PBKDF2 iterations = %d, want >= %d", iter, minAcceptedKDFIterations)
-	}
-	if !bytes.Equal(salt, bytes.Repeat([]byte{0x3d}, keyDerivationSaltLen)) {
-		t.Fatalf("stored salt = %x, want the generated salt", salt)
-	}
-}
-
 func TestRotateMasterKeyMigratesLegacySaltFile(t *testing.T) {
 	tmpHome := withTempHome(t)
 	t.Cleanup(func() { utils.SetMasterKey(nil) })
