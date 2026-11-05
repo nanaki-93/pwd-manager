@@ -15,12 +15,41 @@ import (
 func TestRunListCmd_TextModeReportsErrorOnStderr(t *testing.T) {
 	boom := errors.New("stdout write failure")
 	var errBuf bytes.Buffer
-	err := runListCmd(errWriter{err: boom}, &errBuf, map[string]string{"a": "b"}, false, false)
+	err := runListCmd(errWriter{err: boom}, &errBuf, map[string]string{"a": "b"}, false, false, false)
 	if !errors.Is(err, boom) {
 		t.Fatalf("expected wrapped %v, got %v", boom, err)
 	}
 	if got := errBuf.String(); strings.Count(got, "Error: ") != 1 || !strings.Contains(got, "stdout write failure") {
 		t.Fatalf("expected one Error line on stderr, got %q", got)
+	}
+}
+
+func TestRunListCmd_NonTTYAllowedOutputCompatibility(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		show        bool
+		asJSON      bool
+		allowNonTTY bool
+		want        string
+	}{
+		{"text plaintext override", true, false, true, "github: test-password\n"},
+		{"json masked without override", false, true, false, "{\n  \"github\": \"********\"\n}\n"},
+		{"json masked with override", false, true, true, "{\n  \"github\": \"********\"\n}\n"},
+		{"text masked with override", false, false, true, "github: ********\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var out, errOut bytes.Buffer
+			err := runListCmd(&out, &errOut, map[string]string{"github": "test-password"}, tc.show, tc.asJSON, tc.allowNonTTY)
+			if err != nil {
+				t.Fatalf("allowed output failed: %v", err)
+			}
+			if out.String() != tc.want {
+				t.Fatalf("stdout = %q, want %q", out.String(), tc.want)
+			}
+			if errOut.Len() != 0 {
+				t.Fatalf("unexpected stderr: %q", errOut.String())
+			}
+		})
 	}
 }
 

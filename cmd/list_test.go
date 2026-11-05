@@ -715,7 +715,7 @@ func TestRunListCmd_DefaultPlainTextWhenJSONOmitted(t *testing.T) {
 	}
 
 	var outBuf, errBuf bytes.Buffer
-	if err := runListCmd(&outBuf, &errBuf, saved, false, false); err != nil {
+	if err := runListCmd(&outBuf, &errBuf, saved, false, false, false); err != nil {
 		t.Fatalf("expected no error, got %v", err)
 	}
 	want := "email: ********\ngithub: ********\n"
@@ -733,7 +733,7 @@ func TestRunListCmd_JSONModeWritesStdoutAndRoutesErrorsToStderr(t *testing.T) {
 	}
 
 	var outBuf, errBuf bytes.Buffer
-	if err := runListCmd(&outBuf, &errBuf, saved, true, true); err != nil {
+	if err := runListCmd(&outBuf, &errBuf, saved, true, true, true); err != nil {
 		t.Fatalf("expected no error, got %v", err)
 	}
 	if errBuf.Len() != 0 {
@@ -750,11 +750,28 @@ func TestRunListCmd_JSONModeWritesStdoutAndRoutesErrorsToStderr(t *testing.T) {
 	// Verify error routing to stderr when JSON output fails.
 	boom := errors.New("stdout write failure")
 	var failErrBuf bytes.Buffer
-	err := runListCmd(errWriter{err: boom}, &failErrBuf, saved, false, true)
+	err := runListCmd(errWriter{err: boom}, &failErrBuf, saved, false, true, false)
 	if !errors.Is(err, boom) {
 		t.Fatalf("expected wrapped error %v, got %v", boom, err)
 	}
 	if !strings.Contains(failErrBuf.String(), "stdout write failure") {
 		t.Fatalf("expected error message written to stderr, got %q", failErrBuf.String())
+	}
+}
+
+func TestRunListCmd_RefusesPlaintextToNonTTYWithoutOverride(t *testing.T) {
+	saved := map[string]string{"github": "super-secret-1"}
+	for _, asJSON := range []bool{false, true} {
+		var outBuf, errBuf bytes.Buffer
+		err := runListCmd(&outBuf, &errBuf, saved, true, asJSON, false)
+		if !errors.Is(err, errPlaintextNotTTY) {
+			t.Fatalf("json=%v: expected errPlaintextNotTTY, got %v", asJSON, err)
+		}
+		if outBuf.Len() != 0 {
+			t.Fatalf("json=%v: expected empty stdout, got %q", asJSON, outBuf.String())
+		}
+		if !strings.Contains(errBuf.String(), "refusing to print plaintext") {
+			t.Fatalf("json=%v: expected refusal on stderr, got %q", asJSON, errBuf.String())
+		}
 	}
 }
