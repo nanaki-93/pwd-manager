@@ -157,19 +157,9 @@ func deriveEncryptionKey(secret, salt []byte, iter int) []byte {
 }
 
 // kdf computes every PBKDF2-HMAC-SHA256 derivation of this package; a variable
-// so tests can swap in a cheaper function while recorded parameters stay unchanged.
+// so this package's tests can swap in a cheaper function (see export_test.go)
+// while recorded parameters stay unchanged. No exported API may replace it.
 var kdf = pbkdf2SHA256
-
-// SetKDFForTesting overrides the PBKDF2 function used for master hashes and store
-// keys and returns a restore callback. It is meant only for tests: fn must be
-// deterministic in all its arguments so stores written with it can be read back.
-func SetKDFForTesting(fn func(password, salt []byte, iter, keyLen int) []byte) func() {
-	prev := kdf
-	kdf = fn
-	return func() {
-		kdf = prev
-	}
-}
 
 func validIterations(iter int) bool {
 	return iter >= legacyPBKDF2Iter && iter <= maxPBKDF2Iter
