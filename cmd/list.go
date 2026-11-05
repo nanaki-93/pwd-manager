@@ -172,23 +172,23 @@ func writeJSONEntries(bw *bufio.Writer, keys []string, savedPasswords map[string
 	return nil
 }
 
-// marshalJSONString encodes s like json.Marshal, then rewrites non-printable
-// non-ASCII runes (such as C1 controls U+0080–U+009F) as \uXXXX escapes so the
-// JSON output cannot carry raw terminal control sequences. ASCII-only output
-// is returned unchanged.
+// marshalJSONString encodes s like json.Marshal, then rewrites DEL (U+007F)
+// and non-printable non-ASCII runes (such as C1 controls U+0080–U+009F) as
+// \uXXXX escapes so the JSON output cannot carry raw terminal control
+// sequences. Output without such bytes is returned unchanged.
 func marshalJSONString(s string) ([]byte, error) {
 	enc, err := json.Marshal(s)
 	if err != nil {
 		return nil, err
 	}
-	if !hasNonASCII(enc) {
+	if !needsJSONEscape(enc) {
 		return enc, nil
 	}
 	out := make([]byte, 0, len(enc)+16)
 	for i := 0; i < len(enc); {
 		r, size := utf8.DecodeRune(enc[i:])
 		switch {
-		case r < utf8.RuneSelf || unicode.IsPrint(r):
+		case r != 0x7f && (r < utf8.RuneSelf || unicode.IsPrint(r)):
 			out = append(out, enc[i:i+size]...)
 		case r > 0xffff:
 			r1, r2 := utf16.EncodeRune(r)
@@ -201,9 +201,10 @@ func marshalJSONString(s string) ([]byte, error) {
 	return out, nil
 }
 
-func hasNonASCII(b []byte) bool {
+// needsJSONEscape reports whether b holds DEL or any non-ASCII byte.
+func needsJSONEscape(b []byte) bool {
 	for _, c := range b {
-		if c >= utf8.RuneSelf {
+		if c >= 0x7f {
 			return true
 		}
 	}

@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"bufio"
 	"bytes"
 	"encoding/json"
 	"fmt"
@@ -74,6 +75,45 @@ func TestWriteListJSONOutputEntireC1Range(t *testing.T) {
 					t.Fatal(err)
 				}
 				if !reflect.DeepEqual(got, map[string]string{key: wantValue}) {
+					t.Errorf("show=%v: round-trip = %q", show, got)
+				}
+			}
+		})
+	}
+}
+
+func TestWriteJSONEntriesEscapesDELInKeysAndValues(t *testing.T) {
+	for _, tc := range []struct {
+		name, input, escaped string
+	}{
+		{name: "DEL ASCII fast path", input: "a\u007fb", escaped: `a\u007fb`},
+		{name: "DEL with CSI", input: "\u009b31m\u007f", escaped: `\u009b31m\u007f`},
+		{name: "printable boundary", input: "~\u007f", escaped: `~\u007f`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			for _, show := range []bool{false, true} {
+				var buf bytes.Buffer
+				bw := bufio.NewWriter(&buf)
+				entries := map[string]string{tc.input: tc.input}
+				if err := writeJSONEntries(bw, []string{tc.input}, entries, show); err != nil {
+					t.Fatalf("writeJSONEntries: %v", err)
+				}
+				if err := bw.Flush(); err != nil {
+					t.Fatalf("flush: %v", err)
+				}
+				value, escapedValue := maskedPasswordPlaceholder, maskedPasswordPlaceholder
+				if show {
+					value, escapedValue = tc.input, tc.escaped
+				}
+				want := "{\n  \"" + tc.escaped + "\": \"" + escapedValue + "\"\n}\n"
+				if got := buf.String(); got != want {
+					t.Errorf("show=%v: got %q, want escaped ASCII %q", show, got, want)
+				}
+				var got map[string]string
+				if err := json.Unmarshal(buf.Bytes(), &got); err != nil {
+					t.Fatalf("unmarshal: %v", err)
+				}
+				if !reflect.DeepEqual(got, map[string]string{tc.input: value}) {
 					t.Errorf("show=%v: round-trip = %q", show, got)
 				}
 			}
