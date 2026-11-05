@@ -93,7 +93,19 @@ func TestCaptureRemoveStdoutRestoresStdoutOnGoexit(t *testing.T) {
 			runtime.Goexit()
 		})
 	}()
-	<-done
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		abandonBlockedCapture(t, original, func() bool {
+			select {
+			case <-done:
+				return true
+			case <-time.After(5 * time.Second):
+				return false
+			}
+		})
+		t.Fatal("captureRemoveStdout did not return after Goexit")
+	}
 	if os.Stdout != original {
 		t.Fatal("captureRemoveStdout did not restore stdout after Goexit")
 	}
