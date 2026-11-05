@@ -35,6 +35,36 @@ func TestReadPwdNameBoundsInput(t *testing.T) {
 	}
 }
 
+func TestReadPwdNameAcceptsMaxLengthAtEOF(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		rune string
+	}{
+		{name: "ASCII", rune: "a"},
+		{name: "four-byte UTF-8", rune: "😀"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			want := strings.Repeat(tc.rune, maxPwdNameLen)
+			got, err := readPwdName(strings.NewReader(want))
+			if err != nil || got != want {
+				t.Fatalf("maximum-length name at EOF: got %q, %v; want %q, nil", got, err, want)
+			}
+		})
+	}
+}
+
+func TestReadPwdNameBoundsUnterminatedInput(t *testing.T) {
+	// No newline: reaching EOF must not require consuming the oversized line.
+	src := &countingReader{r: strings.NewReader(strings.Repeat("a", 1<<20))}
+	name, err := readPwdName(src)
+	if !errors.Is(err, errInvalidPwdName) || name != "" {
+		t.Fatalf("oversized unterminated name: got %q, %v; want empty name and errInvalidPwdName", name, err)
+	}
+	if limit := maxPwdNameLen*utf8.UTFMax + len("\r\n") + 4096; src.read > limit {
+		t.Fatalf("readPwdName consumed %d bytes, want at most %d", src.read, limit)
+	}
+}
+
 func TestReadPwdNameAcceptsLongestNameAndKeepsRest(t *testing.T) {
 	longest := strings.Repeat("😀", maxPwdNameLen)
 	reader := bufio.NewReader(strings.NewReader(longest + "\r\ny\n"))
