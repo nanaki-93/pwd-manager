@@ -57,9 +57,11 @@ const (
 )
 
 var (
-	exitFunc          = os.Exit
-	randRead          = io.ReadFull
-	readPasswordStdin = func() ([]byte, error) { return terminal.ReadPassword(int(syscall.Stdin)) }
+	randRead = io.ReadFull
+	// ExitFunc terminates the process after ManageErrorAndExit reports an error.
+	ExitFunc = os.Exit
+	// ReadPasswordStdin reads a password from the terminal without echo.
+	ReadPasswordStdin = func() ([]byte, error) { return terminal.ReadPassword(int(syscall.Stdin)) }
 
 	errDecryptFailed = errors.New("decrypt file err")
 	ErrSymlink       = errors.New("refusing to access symlink")
@@ -163,24 +165,6 @@ var kdf = pbkdf2SHA256
 
 func validIterations(iter int) bool {
 	return iter >= legacyPBKDF2Iter && iter <= maxPBKDF2Iter
-}
-
-// SetExitFunc overrides the process termination function for testing and returns a restore callback.
-func SetExitFunc(fn func(int)) func() {
-	prev := exitFunc
-	exitFunc = fn
-	return func() {
-		exitFunc = prev
-	}
-}
-
-// SetReadPasswordStdin overrides the password reader for testing and returns a restore callback.
-func SetReadPasswordStdin(fn func() ([]byte, error)) func() {
-	prev := readPasswordStdin
-	readPasswordStdin = fn
-	return func() {
-		readPasswordStdin = prev
-	}
 }
 
 // HashMasterPassword generates a salted PBKDF2-SHA256 hash of the supplied password
@@ -473,25 +457,6 @@ func encryptFileWithRawKey(content, key, prefix []byte) error {
 	return nil
 }
 
-func chdirHome() error {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return err
-	}
-	return os.Chdir(home)
-}
-
-func GoToHomeDir() {
-	if err := chdirHome(); err != nil {
-		ManageErrorAndExit(err)
-	}
-}
-
-func readPwdFile() ([]byte, error) {
-	plain, _, err := readPwdFileWithIter()
-	return plain, err
-}
-
 // readPwdFileWithIter decrypts the store and returns the PBKDF2 iteration count it
 // was encrypted with (0 for stores encrypted with the legacy raw key file).
 func readPwdFileWithIter() ([]byte, int, error) {
@@ -671,7 +636,7 @@ func upgradeKDFIfNeeded(pwdObj *model.PwdFile, password []byte, storeIter int) e
 
 func PromptPasswordErr(textForPrompt string) ([]byte, error) {
 	fmt.Println(textForPrompt)
-	pwd, err := readPasswordStdin()
+	pwd, err := ReadPasswordStdin()
 	if err != nil {
 		return nil, err
 	}
@@ -698,12 +663,6 @@ func SaveFileErr(currPwdContent model.PwdFile, err error) error {
 	return encryptFile(jsonContent)
 }
 
-func SaveFile(currPwdContent model.PwdFile, err error) {
-	if saveErr := SaveFileErr(currPwdContent, err); saveErr != nil {
-		ManageErrorAndExit(saveErr)
-	}
-}
-
 func toJsonContent(err error, pwdContent model.PwdFile) ([]byte, error) {
 	if err != nil {
 		return nil, err
@@ -718,7 +677,7 @@ func toJsonContent(err error, pwdContent model.PwdFile) ([]byte, error) {
 func ManageErrorAndExit(err error) {
 	if err != nil {
 		fmt.Println(err)
-		exitFunc(1)
+		ExitFunc(1)
 	}
 }
 

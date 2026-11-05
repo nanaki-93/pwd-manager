@@ -35,9 +35,9 @@ func TestEncryptFileWithRawKey_RoundTripsLargePayload(t *testing.T) {
 		t.Fatalf("encryptFileWithRawKey: %v", err)
 	}
 	SetMasterKey(secret)
-	got, err := readPwdFile()
+	got, _, err := readPwdFileWithIter()
 	if err != nil {
-		t.Fatalf("readPwdFile: %v", err)
+		t.Fatalf("readPwdFileWithIter: %v", err)
 	}
 	if !bytes.Equal(got, payload) {
 		t.Fatalf("decrypted payload mismatch (len %d, want %d)", len(got), len(payload))

@@ -6,7 +6,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/nanaki-93/pwd-manager/internal/utils"
 	"github.com/spf13/cobra"
 )
 
@@ -58,7 +57,7 @@ func TestExecListCmd_FailureReportedOnceOnStderrOnly(t *testing.T) {
 		var code []int
 		prevExit := listExitFunc
 		listExitFunc = func(c int) { code = append(code, c) }
-		restoreUtilsExit := utils.SetExitFunc(func(int) { t.Error("utils exit must not be used by list") })
+		restoreUtilsExit := setUtilsExit(func(int) { t.Error("utils exit must not be used by list") })
 		prevShow, prevJSON, prevAllow := listShowFlag, listJSONFlag, listAllowNonTTYFlag
 		listShowFlag, listJSONFlag, listAllowNonTTYFlag = true, asJSON, false
 

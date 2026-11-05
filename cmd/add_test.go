@@ -308,7 +308,7 @@ func TestSavePasswordRejectsEmptyCurrentPassword(t *testing.T) {
 	tmpHome := os.Getenv("HOME")
 	prompts := 0
 	promptHome := ""
-	restorePrompt := utils.SetReadPasswordStdin(func() ([]byte, error) {
+	restorePrompt := setUtilsReadPassword(func() ([]byte, error) {
 		prompts++
 		promptHome = os.Getenv("HOME")
 		return []byte{}, nil
@@ -672,7 +672,7 @@ func TestExecAddCmdZeroesPromptedPasswordBuffer(t *testing.T) {
 
 	secretBuf := []byte("zero-me-secret")
 	calls := 0
-	restore := utils.SetReadPasswordStdin(func() ([]byte, error) {
+	restore := setUtilsReadPassword(func() ([]byte, error) {
 		calls++
 		if calls == 1 {
 			return []byte("valid-master-pass"), nil
