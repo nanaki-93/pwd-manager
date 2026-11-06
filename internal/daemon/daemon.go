@@ -135,12 +135,14 @@ func listenForHotkey(ctx context.Context) error {
 }
 
 // serveHotkey calls onPress for each keydown event until ctx is cancelled
-// (returning nil, a clean stop) or the event channel closes.
+// or the event channel closes. On cancellation it first clears a password
+// whose auto-clear is still pending (see clearClipboardOnShutdown), so it
+// does not outlive the process; a failure to clear it is returned.
 func serveHotkey(ctx context.Context, keydown <-chan hotkey.Event, onPress func()) error {
 	for {
 		select {
 		case <-ctx.Done():
-			return nil
+			return clearClipboardOnShutdown()
 		case _, ok := <-keydown:
 			if !ok {
 				return nil
@@ -250,6 +252,45 @@ func copyPasswordToClipboard(pwd string) error {
 		clearClipboardIfTokenMatches(token, pwd)
 	})
 
+	return nil
+}
+
+// clearClipboardOnShutdown runs a pending auto-clear now, synchronously: it
+// stops the clear timer, invalidates the token so no scheduled or retrying
+// clear runs again, and clears the clipboard only if it still holds the
+// active or a stale tracked password. It holds clipboardClearMu throughout,
+// so a clear already running finishes first and no new copy starts meanwhile.
+func clearClipboardOnShutdown() error {
+	clipboardClearMu.Lock()
+	defer clipboardClearMu.Unlock()
+	clipboardMu.Lock()
+	if !clipboardOwned && len(clipboardStalePwds) == 0 {
+		clipboardMu.Unlock()
+		return nil
+	}
+	if clipboardTimer != nil {
+		clipboardTimer.Stop()
+		clipboardTimer = nil
+	}
+	clipboardToken++
+	targets := slices.Clone(clipboardStalePwds)
+	if clipboardOwned {
+		targets = append(targets, clipboardActivePwd)
+	}
+	clipboardOwned, clipboardActivePwd, clipboardStalePwds = false, "", nil
+	readFn, writeFn := readClipboard, writeClipboard
+	clipboardMu.Unlock()
+
+	current, err := readFn()
+	if err != nil {
+		return fmt.Errorf("read clipboard to clear password on shutdown: %w; it may still be on the clipboard", err)
+	}
+	if !clipboardHoldsAny(current, targets) {
+		return nil
+	}
+	if err := writeFn(""); err != nil {
+		return fmt.Errorf("clear password from clipboard on shutdown: %w; it may still be on the clipboard", err)
+	}
 	return nil
 }
 
