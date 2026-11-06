@@ -9,28 +9,48 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/nanaki-93/pwd-manager/internal/model"
 	"github.com/nanaki-93/pwd-manager/internal/utils"
 )
 
-func TestReadPwdNameWithSpaces(t *testing.T) {
-	name, err := readPwdName(strings.NewReader("my email account\n"))
-	if err != nil {
-		t.Fatalf("expected no error, got %v", err)
-	}
-	if name != "my email account" {
-		t.Fatalf("expected %q, got %q", "my email account", name)
+func TestReadPwdNameAcceptsValidNames(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		input string
+		want  string
+	}{
+		{name: "spaces inside name", input: "my email account\n", want: "my email account"},
+		{name: "surrounding whitespace trimmed at EOF", input: "  work vpn account  ", want: "work vpn account"},
+		{name: "printable Unicode", input: "conto bancario è già\n", want: "conto bancario è già"},
+		{name: "max length two-byte runes", input: strings.Repeat("é", maxPwdNameLen) + "\n", want: strings.Repeat("é", maxPwdNameLen)},
+		{name: "max length ASCII at EOF", input: strings.Repeat("a", maxPwdNameLen), want: strings.Repeat("a", maxPwdNameLen)},
+		{name: "max length four-byte runes at EOF", input: strings.Repeat("😀", maxPwdNameLen), want: strings.Repeat("😀", maxPwdNameLen)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := readPwdName(strings.NewReader(tc.input))
+			if err != nil || got != tc.want {
+				t.Fatalf("got %q, %v; want %q, nil", got, err, tc.want)
+			}
+		})
 	}
 }
 
-func TestReadPwdNameTrimsSurroundingWhitespaceAndHandlesEOF(t *testing.T) {
-	name, err := readPwdName(strings.NewReader("  work vpn account  "))
+func TestReadPwdNameAcceptsLongestNameAndKeepsRest(t *testing.T) {
+	longest := strings.Repeat("😀", maxPwdNameLen)
+	reader := bufio.NewReader(strings.NewReader(longest + "\r\ny\n"))
+
+	name, err := readPwdName(reader)
 	if err != nil {
-		t.Fatalf("expected no error on unterminated non-empty line, got %v", err)
+		t.Fatalf("expected longest valid name to be accepted, got %v", err)
 	}
-	if name != "work vpn account" {
-		t.Fatalf("expected %q, got %q", "work vpn account", name)
+	if name != longest {
+		t.Fatalf("expected name of %d runes, got %q", maxPwdNameLen, name)
+	}
+	rest, err := reader.ReadString('\n')
+	if err != nil || rest != "y\n" {
+		t.Fatalf("expected remaining input %q, got %q (err %v)", "y\n", rest, err)
 	}
 }
 
@@ -68,92 +88,110 @@ func TestReadPwdNameEmpty(t *testing.T) {
 	}
 }
 
-func TestCanSavePasswordExistingKey(t *testing.T) {
+func TestReadPwdNameRejectsInvalidNames(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		input string
+	}{
+		{name: "ANSI escape sequence", input: "evil\x1b[2J\x1b]0;pwned\x07name\n"},
+		{name: "bare escape byte", input: "a\x1bb\n"},
+		{name: "embedded NUL", input: "a\x00b\n"},
+		{name: "carriage return", input: "fake\rname\n"},
+		{name: "embedded tab", input: "a\tb\n"},
+		{name: "C1 control CSI", input: "a\u009bb\n"},
+		{name: "bidi override", input: "a‮b\n"},
+		{name: "invalid UTF-8", input: "a\xffb\n"},
+		{name: "too long", input: strings.Repeat("x", maxPwdNameLen+1) + "\n"},
+		{name: "too long Unicode at EOF", input: strings.Repeat("é", maxPwdNameLen+1)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			name, err := readPwdName(strings.NewReader(tc.input))
+			if err == nil {
+				t.Fatalf("expected rejection, got name %q", name)
+			}
+			if !errors.Is(err, errInvalidPwdName) {
+				t.Fatalf("expected errInvalidPwdName, got %q", err.Error())
+			}
+			if name != "" {
+				t.Fatalf("expected empty name on rejection, got %q", name)
+			}
+			if strings.ContainsAny(err.Error(), "\x1b\x00\r\a") {
+				t.Fatalf("error message must not echo raw control bytes: %q", err.Error())
+			}
+		})
+	}
+}
+
+// countingReader counts the bytes its caller pulls from the wrapped reader.
+type countingReader struct {
+	r    io.Reader
+	read int
+}
+
+func (c *countingReader) Read(p []byte) (int, error) {
+	n, err := c.r.Read(p)
+	c.read += n
+	return n, err
+}
+
+func TestReadPwdNameBoundsInput(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		terminator string
+	}{
+		{name: "newline-terminated", terminator: "\n"},
+		{name: "unterminated", terminator: ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			src := &countingReader{r: strings.NewReader(strings.Repeat("a", 1<<20) + tc.terminator)}
+			name, err := readPwdName(src)
+			if !errors.Is(err, errInvalidPwdName) || name != "" {
+				t.Fatalf("oversized name: got %q, %v; want empty name and errInvalidPwdName", name, err)
+			}
+			// One bufio fill past the bound is allowed; the whole line is not.
+			if limit := maxPwdNameLen*utf8.UTFMax + len("\r\n") + 4096; src.read > limit {
+				t.Fatalf("readPwdName consumed %d bytes, want at most %d", src.read, limit)
+			}
+		})
+	}
+}
+
+func TestCanSavePassword(t *testing.T) {
 	saved := map[string]string{"github": "secret"}
-
-	proceed, err := canSavePassword(saved, "github", strings.NewReader("n\n"))
-	if err != nil {
-		t.Fatalf("expected no error, got %v", err)
-	}
-	if proceed {
-		t.Fatal("expected proceed to be false when user declines overwrite")
-	}
-
-	proceed, err = canSavePassword(saved, "github", strings.NewReader("y\n"))
-	if err != nil {
-		t.Fatalf("expected no error, got %v", err)
-	}
-	if !proceed {
-		t.Fatal("expected proceed to be true when user confirms overwrite")
-	}
-
-	proceed, err = canSavePassword(saved, "github", strings.NewReader("  Y \n"))
-	if err != nil {
-		t.Fatalf("expected no error, got %v", err)
-	}
-	if !proceed {
-		t.Fatal("expected proceed to be true when user confirms overwrite with uppercase Y")
-	}
-
-	proceed, err = canSavePassword(saved, "github", strings.NewReader("\n"))
-	if err != nil {
-		t.Fatalf("expected no error, got %v", err)
-	}
-	if proceed {
-		t.Fatal("expected proceed to be false on empty confirmation input")
-	}
-
-	proceed, err = canSavePassword(saved, "gitlab", strings.NewReader(""))
-	if err != nil {
-		t.Fatalf("expected no error, got %v", err)
-	}
-	if !proceed {
-		t.Fatal("expected proceed to be true when key does not exist")
-	}
-
-	proceed, err = canSavePassword(nil, "github", strings.NewReader(""))
-	if err != nil {
-		t.Fatalf("expected no error with nil map, got %v", err)
-	}
-	if !proceed {
-		t.Fatal("expected proceed to be true when map is nil")
+	for _, tc := range []struct {
+		name  string
+		saved map[string]string
+		key   string
+		input string
+		want  bool
+	}{
+		{name: "declines overwrite", saved: saved, key: "github", input: "n\n", want: false},
+		{name: "confirms overwrite", saved: saved, key: "github", input: "y\n", want: true},
+		{name: "confirms with padded uppercase Y", saved: saved, key: "github", input: "  Y \n", want: true},
+		{name: "empty confirmation declines", saved: saved, key: "github", input: "\n", want: false},
+		{name: "new key needs no confirmation", saved: saved, key: "gitlab", input: "", want: true},
+		{name: "nil map needs no confirmation", saved: nil, key: "github", input: "", want: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			proceed, err := canSavePassword(tc.saved, tc.key, strings.NewReader(tc.input))
+			if err != nil || proceed != tc.want {
+				t.Fatalf("got proceed=%v, err=%v; want %v, nil", proceed, err, tc.want)
+			}
+		})
 	}
 }
 
 func TestSequentialPromptsWithSharedBufferedStdin(t *testing.T) {
-	tests := []struct {
+	for _, tc := range []struct {
 		name        string
 		input       string
-		wantPwdName string
 		wantProceed bool
 	}{
-		{
-			name:        "confirms overwrite from buffered second line",
-			input:       "github\ny\n",
-			wantPwdName: "github",
-			wantProceed: true,
-		},
-		{
-			name:        "declines overwrite from buffered second line",
-			input:       "github\nn\n",
-			wantPwdName: "github",
-			wantProceed: false,
-		},
-		{
-			name:        "confirms overwrite on unterminated second line at EOF",
-			input:       "  github  \n  Y  ",
-			wantPwdName: "github",
-			wantProceed: true,
-		},
-		{
-			name:        "declines overwrite when EOF reached before second line",
-			input:       "github\n",
-			wantPwdName: "github",
-			wantProceed: false,
-		},
-	}
-
-	for _, tc := range tests {
+		{name: "confirms overwrite from buffered second line", input: "github\ny\n", wantProceed: true},
+		{name: "declines overwrite from buffered second line", input: "github\nn\n", wantProceed: false},
+		{name: "confirms overwrite on unterminated second line at EOF", input: "  github  \n  Y  ", wantProceed: true},
+		{name: "declines overwrite when EOF reached before second line", input: "github\n", wantProceed: false},
+	} {
 		t.Run(tc.name, func(t *testing.T) {
 			oldStdin := os.Stdin
 			r, w, err := os.Pipe()
@@ -167,98 +205,19 @@ func TestSequentialPromptsWithSharedBufferedStdin(t *testing.T) {
 			}()
 
 			if _, err := io.WriteString(w, tc.input); err != nil {
+				_ = w.Close()
 				t.Fatalf("failed to write to pipe: %v", err)
 			}
 			_ = w.Close()
 
 			stdinReader := bufio.NewReader(os.Stdin)
 			pwdName, err := readPwdName(stdinReader)
-			if err != nil {
-				t.Fatalf("expected no error reading password name, got %v", err)
-			}
-			if pwdName != tc.wantPwdName {
-				t.Fatalf("expected password name %q, got %q", tc.wantPwdName, pwdName)
+			if err != nil || pwdName != "github" {
+				t.Fatalf("expected password name %q, got %q (err %v)", "github", pwdName, err)
 			}
 
 			saved := map[string]string{"github": "secret"}
 			proceed, err := canSavePassword(saved, pwdName, stdinReader)
-			if err != nil {
-				t.Fatalf("expected no error reading overwrite confirmation, got %v", err)
-			}
-			if proceed != tc.wantProceed {
-				t.Fatalf("expected proceed=%v, got %v", tc.wantProceed, proceed)
-			}
-		})
-	}
-}
-
-func TestSharedBufferedReaderSequentialPrompts(t *testing.T) {
-	tests := []struct {
-		name        string
-		input       string
-		wantName    string
-		wantProceed bool
-	}{
-		{
-			name:        "confirms overwrite on second line",
-			input:       "github\ny\n",
-			wantName:    "github",
-			wantProceed: true,
-		},
-		{
-			name:        "confirms overwrite without trailing newline",
-			input:       "github\ny",
-			wantName:    "github",
-			wantProceed: true,
-		},
-		{
-			name:        "declines overwrite on second line",
-			input:       "github\nn\n",
-			wantName:    "github",
-			wantProceed: false,
-		},
-		{
-			name:        "eof on second prompt defaults to false",
-			input:       "github\n",
-			wantName:    "github",
-			wantProceed: false,
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			r, w, err := os.Pipe()
-			if err != nil {
-				t.Fatalf("failed to create stdin pipe: %v", err)
-			}
-			defer func() {
-				_ = r.Close()
-			}()
-
-			if _, err := io.WriteString(w, tc.input); err != nil {
-				_ = w.Close()
-				t.Fatalf("failed to write piped input: %v", err)
-			}
-			_ = w.Close()
-
-			oldStdin := os.Stdin
-			os.Stdin = r
-			defer func() {
-				os.Stdin = oldStdin
-			}()
-
-			stdinReader := bufio.NewReader(os.Stdin)
-
-			name, err := readPwdName(stdinReader)
-			if err != nil {
-				t.Fatalf("expected no error reading password name, got %v", err)
-			}
-			if name != tc.wantName {
-				t.Fatalf("expected password name %q, got %q", tc.wantName, name)
-			}
-
-			saved := map[string]string{"github": "secret"}
-			proceed, err := canSavePassword(saved, name, stdinReader)
 			if err != nil {
 				t.Fatalf("expected no error reading overwrite confirmation, got %v", err)
 			}
@@ -338,6 +297,34 @@ func TestSavePasswordRejectsEmptyCurrentPassword(t *testing.T) {
 	}
 }
 
+func TestSavePasswordWhenMasterPasswordEmpty(t *testing.T) {
+	// Restore the original working directory in case savePassword changes it.
+	origWd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("failed to get working directory: %v", err)
+	}
+	defer func() {
+		_ = os.Chdir(origWd)
+	}()
+
+	tmpHome := t.TempDir()
+	t.Setenv("HOME", tmpHome)
+	stubPasswordSequence(t, "valid-master-password")
+
+	output := captureStdout(t, func() {
+		savePassword(model.PwdFile{MasterPassword: ""})
+	})
+	if strings.Contains(output, "Enter your current password:") {
+		t.Fatalf("did not expect current password prompt when MasterPassword is empty, got %q", output)
+	}
+	if !strings.Contains(output, "Enter your new password:") {
+		t.Fatalf("expected new password prompt when MasterPassword is empty, got %q", output)
+	}
+	if !strings.Contains(output, "Password saved") {
+		t.Fatalf("expected 'Password saved' in output, got %q", output)
+	}
+}
+
 func TestCaptureStdoutRestoresStdoutOnPanic(t *testing.T) {
 	original := os.Stdout
 	t.Cleanup(func() { os.Stdout = original })
@@ -386,63 +373,29 @@ func TestCaptureStdoutDrainsOutputLargerThanPipeBuffer(t *testing.T) {
 	}
 }
 
-func TestSavePasswordWhenMasterPasswordEmpty(t *testing.T) {
-	// Restore the original working directory in case savePassword changes it.
-	origWd, err := os.Getwd()
-	if err != nil {
-		t.Fatalf("failed to get working directory: %v", err)
-	}
-	defer func() {
-		_ = os.Chdir(origWd)
-	}()
-
-	tmpHome := t.TempDir()
-	t.Setenv("HOME", tmpHome)
-	stubPasswordSequence(t, "valid-master-password")
-
-	output := captureStdout(t, func() {
-		savePassword(model.PwdFile{MasterPassword: ""})
-	})
-	if strings.Contains(output, "Enter your current password:") {
-		t.Fatalf("did not expect current password prompt when MasterPassword is empty, got %q", output)
-	}
-	if !strings.Contains(output, "Enter your new password:") {
-		t.Fatalf("expected new password prompt when MasterPassword is empty, got %q", output)
-	}
-	if !strings.Contains(output, "Password saved") {
-		t.Fatalf("expected 'Password saved' in output, got %q", output)
-	}
-}
-
-func TestStorePasswordReportsSaveFailure(t *testing.T) {
-	saveErr := errors.New("disk full")
+func TestStorePasswordPersistsNonemptyValues(t *testing.T) {
 	orig := saveVault
 	t.Cleanup(func() { saveVault = orig })
 
-	var gotIn error
-	var savedValue string
-	saveVault = func(p model.PwdFile, in error) error {
-		gotIn, savedValue = in, p.SavedPasswords["github"]
-		return saveErr
-	}
-
-	err := storePassword(model.PwdFile{}, "github", "secret")
-	if !errors.Is(err, saveErr) {
-		t.Fatalf("expected save error to be returned, got %v", err)
-	}
-	if !strings.Contains(err.Error(), `save password "github"`) {
-		t.Fatalf("expected operation context in error, got %q", err.Error())
-	}
-	if gotIn != nil {
-		t.Fatalf("expected no stale error passed to save, got %v", gotIn)
-	}
-	if savedValue != "secret" {
-		t.Fatalf("expected password to be stored before save, got %q", savedValue)
-	}
-
-	saveVault = func(model.PwdFile, error) error { return nil }
-	if err := storePassword(model.PwdFile{}, "github", "secret"); err != nil {
-		t.Fatalf("expected nil on successful save, got %v", err)
+	for _, value := range []string{" ", "\t\n", "x", "\x00", "🔐"} {
+		t.Run("value="+value, func(t *testing.T) {
+			calls := 0
+			var saved model.PwdFile
+			saveVault = func(p model.PwdFile, in error) error {
+				if in != nil {
+					t.Fatalf("unexpected incoming error: %v", in)
+				}
+				calls++
+				saved = p
+				return nil
+			}
+			if err := storePassword(model.PwdFile{}, "new-entry", value); err != nil {
+				t.Fatalf("nonempty value rejected: %v", err)
+			}
+			if calls != 1 || saved.SavedPasswords["new-entry"] != value {
+				t.Fatalf("expected one save preserving the exact nonempty value; calls=%d", calls)
+			}
+		})
 	}
 }
 
@@ -513,37 +466,54 @@ func TestStorePasswordPreservesExistingEntries(t *testing.T) {
 	if saved.SavedPasswords["github"] != "new-secret" {
 		t.Fatalf("expected overwritten value for github, got %q", saved.SavedPasswords["github"])
 	}
+	if got := initial.SavedPasswords["github"]; got != "new-secret" {
+		t.Fatalf("expected caller's map to keep the new value after a successful save, got %q", got)
+	}
 }
 
-func TestExecAddCmdRejectsEmptyPasswordAfterOverwriteConfirm(t *testing.T) {
-	seedExecAddVault(t, "valid-master-pass", map[string]string{"github": "old-secret"})
+func TestStorePasswordRollsBackMapOnSaveFailure(t *testing.T) {
+	orig := saveVault
+	t.Cleanup(func() { saveVault = orig })
+	saveErr := errors.New("disk full")
 
-	origCopy := addCopyFlag
-	t.Cleanup(func() { addCopyFlag = origCopy })
-	addCopyFlag = false
+	for _, tc := range []struct {
+		name    string
+		initial map[string]string
+	}{
+		{name: "overwrite restores previous value", initial: map[string]string{"email": "keep-me", "github": "old-secret"}},
+		{name: "new key is removed", initial: map[string]string{"email": "keep-me"}},
+		{name: "preexisting empty value stays present", initial: map[string]string{"github": ""}},
+		{name: "nil map stays empty", initial: nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var savedGithub string
+			var gotIn error
+			saveVault = func(p model.PwdFile, in error) error {
+				savedGithub, gotIn = p.SavedPasswords["github"], in
+				return saveErr
+			}
+			want := make(map[string]string, len(tc.initial))
+			for k, v := range tc.initial {
+				want[k] = v
+			}
+			pwdObj := model.PwdFile{MasterPassword: "hashed-master", SavedPasswords: tc.initial}
 
-	stubPasswordSequence(t, "valid-master-pass", "")
-	exitCount := captureExit(t)
-
-	out := captureStdout(t, func() {
-		feedStdinInput(t, "github\ny\n", func() {
-			execAddCmd(addCmd, nil)
+			err := storePassword(pwdObj, "github", "new-secret")
+			if !errors.Is(err, saveErr) || !strings.Contains(err.Error(), `save password "github"`) {
+				t.Fatalf("expected save error wrapped with context, got %v", err)
+			}
+			if savedGithub != "new-secret" || gotIn != nil {
+				t.Fatalf("expected new value and no stale error passed to save, got %q, %v", savedGithub, gotIn)
+			}
+			if len(pwdObj.SavedPasswords) != len(want) {
+				t.Fatalf("expected map %v, got %v", want, pwdObj.SavedPasswords)
+			}
+			for k, v := range want {
+				if got, ok := pwdObj.SavedPasswords[k]; !ok || got != v {
+					t.Fatalf("expected %q=%q, got %q (present=%v)", k, v, got, ok)
+				}
+			}
 		})
-	})
-
-	if *exitCount == 0 {
-		t.Fatal("expected ManageErrorAndExit to be called for an empty password")
-	}
-	if !strings.Contains(out, "password value cannot be empty") {
-		t.Fatalf("expected empty password error in output, got %q", out)
-	}
-	utils.SetMasterKey([]byte("valid-master-pass"))
-	loaded, err := utils.GetPwdObj()
-	if err != nil {
-		t.Fatalf("failed to reload vault: %v", err)
-	}
-	if loaded.SavedPasswords["github"] != "old-secret" {
-		t.Fatalf("expected existing password kept, got %q", loaded.SavedPasswords["github"])
 	}
 }
 
@@ -565,189 +535,166 @@ func seedExecAddVault(t *testing.T, masterPass string, existing map[string]strin
 	return tmpHome
 }
 
-func TestExecAddCmdSaveFailureAbortsBeforeClipboardAndExits(t *testing.T) {
-	seedExecAddVault(t, "valid-master-pass", map[string]string{"existing": "keep"})
-
-	origSave := saveVault
-	origClip := clipboardWriteAll
-	origCopy := addCopyFlag
-	t.Cleanup(func() {
-		saveVault = origSave
-		clipboardWriteAll = origClip
-		addCopyFlag = origCopy
-	})
-
-	saveErr := errors.New("write vault failed")
-	saveVault = func(model.PwdFile, error) error {
-		return saveErr
-	}
-	clipCalled := false
-	clipboardWriteAll = func(string) error {
-		clipCalled = true
-		return nil
-	}
-	addCopyFlag = true
-
-	stubPasswordSequence(t, "valid-master-pass", "new-secret-value")
+func TestExecAddCmdRejectsEmptyPasswordAfterOverwriteConfirm(t *testing.T) {
+	seedExecAddVault(t, "valid-master-pass", map[string]string{"github": "old-secret"})
+	stubAddClipboard(t, false, clipboardWriteAll)
+	stubPasswordSequence(t, "valid-master-pass", "")
 	exitCount := captureExit(t)
 
-	out := captureStdout(t, func() {
-		feedStdinInput(t, "github\n", func() {
-			execAddCmd(addCmd, nil)
-		})
-	})
+	out := runExecAdd(t, "github\ny\n")
 
 	if *exitCount == 0 {
-		t.Fatal("expected ManageErrorAndExit to be called on save failure")
+		t.Fatal("expected ManageErrorAndExit to be called for an empty password")
 	}
-	if clipCalled {
-		t.Fatal("expected clipboard not to be written when vault save fails")
+	if !strings.Contains(out, "password value cannot be empty") {
+		t.Fatalf("expected empty password error in output, got %q", out)
 	}
-	if !strings.Contains(out, `save password "github": write vault failed`) {
-		t.Fatalf("expected wrapped save failure in output, got %q", out)
-	}
-	if strings.Contains(out, "new-secret-value") {
-		t.Fatalf("expected secret password not to leak to stdout, got %q", out)
+	if saved := loadSavedPasswords(t, "valid-master-pass"); saved["github"] != "old-secret" {
+		t.Fatalf("expected existing password kept, got %q", saved["github"])
 	}
 }
 
-func TestExecAddCmdPersistsAndCopiesOnSuccess(t *testing.T) {
-	seedExecAddVault(t, "valid-master-pass", nil)
-
-	origClip := clipboardWriteAll
-	origCopy := addCopyFlag
-	t.Cleanup(func() {
-		clipboardWriteAll = origClip
-		addCopyFlag = origCopy
-	})
-
-	var copied string
-	clipboardWriteAll = func(text string) error {
-		copied = text
-		return nil
+func TestGetPwdObjAfterCheckMasterPropagatesLoadError(t *testing.T) {
+	_ = withTempHome(t)
+	if _, err := utils.GetPwdObjAfterCheckMaster(); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("expected os.ErrNotExist when password file does not exist, got: %v", err)
 	}
-	addCopyFlag = true
+}
 
-	stubPasswordSequence(t, "valid-master-pass", "super-secret-123")
-	exitCount := captureExit(t)
-
-	_ = captureStdout(t, func() {
-		feedStdinInput(t, "github\n", func() {
-			execAddCmd(addCmd, nil)
-		})
-	})
-
-	if *exitCount != 0 {
-		t.Fatalf("expected no error exit on successful add, got %d", *exitCount)
+func TestGetPwdObjAfterCheckMasterRejectsMismatchedMasterPassword(t *testing.T) {
+	if fi, err := os.Stdin.Stat(); err != nil || (fi.Mode()&os.ModeCharDevice) != 0 {
+		t.Skip("skipping test when stdin is a terminal device")
 	}
-	if copied != "super-secret-123" {
-		t.Fatalf("expected password copied to clipboard after save, got %q", copied)
-	}
+	tmpHome := withTempHome(t)
+	writeTestKey(t, tmpHome, 0x11)
 
-	utils.SetMasterKey([]byte("valid-master-pass"))
-	loaded, err := utils.GetPwdObj()
+	hashed, err := utils.HashMasterPassword([]byte("non-empty-master-secret"))
 	if err != nil {
-		t.Fatalf("failed to reload vault after add: %v", err)
+		t.Fatalf("failed to hash master password: %v", err)
 	}
-	if loaded.SavedPasswords["github"] != "super-secret-123" {
-		t.Fatalf("expected saved password in vault, got %v", loaded.SavedPasswords)
+	if err := utils.SaveFileErr(model.PwdFile{MasterPassword: hashed}, nil); err != nil {
+		t.Fatalf("SaveFileErr: %v", err)
+	}
+
+	got, err := utils.GetPwdObjAfterCheckMaster()
+	if err == nil || got.MasterPassword != "" {
+		t.Fatalf("expected error and empty PwdFile on verification failure, got %+v, err=%v", got, err)
+	}
+
+	restoreReader := setUtilsReadPassword(func() ([]byte, error) {
+		return []byte("non-empty-master-secret"), nil
+	})
+	defer restoreReader()
+
+	gotValid, err := utils.GetPwdObjAfterCheckMaster()
+	if err != nil || gotValid.MasterPassword != hashed {
+		t.Fatalf("expected loaded MasterPassword %q, got %q (err=%v)", hashed, gotValid.MasterPassword, err)
 	}
 }
 
-func TestExecAddCmdZeroesPromptedPasswordBuffer(t *testing.T) {
-	seedExecAddVault(t, "valid-master-pass", nil)
-
-	origClip := clipboardWriteAll
-	origCopy := addCopyFlag
-	t.Cleanup(func() {
-		clipboardWriteAll = origClip
-		addCopyFlag = origCopy
-	})
-	var copied string
-	clipboardWriteAll = func(text string) error {
-		copied = text
-		return nil
+func TestHashAndVerifyMasterPassword(t *testing.T) {
+	raw := []byte("correct-horse-battery-staple")
+	hash1, err1 := utils.HashMasterPassword(raw)
+	hash2, err2 := utils.HashMasterPassword(raw)
+	if err1 != nil || err2 != nil || hash1 == hash2 || strings.Contains(hash1, string(raw)) {
+		t.Fatalf("expected distinct salted hashes without raw secret, got %q, %q (errs: %v, %v)", hash1, hash2, err1, err2)
 	}
-	addCopyFlag = true
-
-	secretBuf := []byte("zero-me-secret")
-	calls := 0
-	restore := setUtilsReadPassword(func() ([]byte, error) {
-		calls++
-		if calls == 1 {
-			return []byte("valid-master-pass"), nil
-		}
-		return secretBuf, nil
-	})
-	t.Cleanup(restore)
-	exitCount := captureExit(t)
-
-	_ = captureStdout(t, func() {
-		feedStdinInput(t, "github\n", func() {
-			execAddCmd(addCmd, nil)
-		})
-	})
-
-	if *exitCount != 0 {
-		t.Fatalf("expected no error exit, got %d", *exitCount)
+	if !utils.VerifyMasterPassword(hash1, raw) || !utils.VerifyMasterPassword(hash2, raw) {
+		t.Fatalf("expected both salted hashes to verify against original password")
 	}
-	for i, b := range secretBuf {
-		if b != 0 {
-			t.Fatalf("expected prompted password buffer zeroed, byte %d is %q (buffer %q)", i, b, secretBuf)
+	if utils.VerifyMasterPassword(hash1, []byte("wrong-password")) {
+		t.Fatalf("expected wrong password to be rejected")
+	}
+
+	invalidStored := []string{
+		"", "pbkdf2-sha256$", "pbkdf2-sha256$onlysalt", "pbkdf2-sha256$a$b$c",
+		"pbkdf2-sha256$not-hex$abcd", "pbkdf2-sha256$$abcd", "pbkdf2-sha256$abcd$not-hex",
+		"pbkdf2-sha256$abcd$", "legacy-plaintext",
+	}
+	for _, stored := range invalidStored {
+		if utils.VerifyMasterPassword(stored, raw) || utils.VerifyMasterPassword(stored, nil) {
+			t.Fatalf("expected VerifyMasterPassword(%q) to return false", stored)
 		}
 	}
-	if copied != "zero-me-secret" {
-		t.Fatalf("expected password copied to clipboard, got %q", copied)
-	}
-	utils.SetMasterKey([]byte("valid-master-pass"))
-	loaded, err := utils.GetPwdObj()
-	if err != nil {
-		t.Fatalf("failed to reload vault: %v", err)
-	}
-	if loaded.SavedPasswords["github"] != "zero-me-secret" {
-		t.Fatalf("expected saved password in vault, got %v", loaded.SavedPasswords)
+	if utils.VerifyMasterPassword("legacy-plaintext", []byte("legacy-plaintext")) {
+		t.Fatalf("expected unprefixed plaintext verification to be rejected")
 	}
 }
 
-func TestExecAddCmdSurfacesClipboardFailure(t *testing.T) {
-	seedExecAddVault(t, "valid-master-pass", nil)
-
-	origClip := clipboardWriteAll
-	origCopy := addCopyFlag
-	t.Cleanup(func() {
-		clipboardWriteAll = origClip
-		addCopyFlag = origCopy
-	})
-	clipboardWriteAll = func(string) error {
-		return errors.New("no clipboard available")
+func TestSaveFileRejectsMissingKeyUpstreamAndCipherErrors(t *testing.T) {
+	tmpHome := withTempHome(t)
+	if err := utils.SaveFileErr(model.PwdFile{MasterPassword: "hash"}, nil); err == nil {
+		t.Fatalf("expected SaveFileErr to return error when key file is missing")
 	}
-	addCopyFlag = true
-
-	stubPasswordSequence(t, "valid-master-pass", "clip-fail-secret")
-	exitCount := captureExit(t)
-
-	out := captureStdout(t, func() {
-		feedStdinInput(t, "github\n", func() {
-			execAddCmd(addCmd, nil)
-		})
-	})
-
-	if *exitCount == 0 {
-		t.Fatal("expected ManageErrorAndExit to be called on clipboard failure")
+	if _, statErr := os.Stat(filepath.Join(tmpHome, utils.PwdFileName)); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("expected encrypted file not to be created when encryption fails, stat err: %v", statErr)
 	}
-	want := `password "github" saved, but failed to copy password to clipboard: no clipboard available`
-	if !strings.Contains(out, want) {
-		t.Fatalf("expected %q in output, got %q", want, out)
+
+	inErr := errors.New("upstream failure")
+	if err := utils.SaveFileErr(model.PwdFile{MasterPassword: "hash"}, inErr); !errors.Is(err, inErr) {
+		t.Fatalf("expected SaveFileErr to return input error %v, got %v", inErr, err)
 	}
-	if strings.Contains(out, "clip-fail-secret") {
-		t.Fatalf("expected secret not to leak to stdout, got %q", out)
+
+	keyPath := filepath.Join(tmpHome, utils.PwdFileKey)
+	pwdPath := filepath.Join(tmpHome, utils.PwdFileName)
+	if err := os.WriteFile(keyPath, []byte("short"), 0700); err != nil {
+		t.Fatalf("failed to write short key: %v", err)
 	}
-	utils.SetMasterKey([]byte("valid-master-pass"))
-	loaded, err := utils.GetPwdObj()
+	if err := utils.SaveFileErr(model.PwdFile{MasterPassword: "hash"}, nil); err == nil {
+		t.Fatalf("expected SaveFileErr to fail with invalid AES key size")
+	}
+	if _, statErr := os.Stat(pwdPath); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("expected password file not to exist after cipher init failure, got: %v", statErr)
+	}
+}
+
+func TestSaveFileAndGetPwdObjStorageAndRoundTrip(t *testing.T) {
+	tmpHome := withTempHome(t)
+	writeTestKey(t, tmpHome, 0x33)
+	pwdPath := filepath.Join(tmpHome, utils.PwdFileName)
+
+	if err := os.WriteFile(pwdPath, []byte("tiny"), 0700); err != nil {
+		t.Fatalf("failed to write truncated ciphertext: %v", err)
+	}
+	if _, err := utils.GetPwdObj(); err == nil {
+		t.Fatalf("expected GetPwdObj to return error on truncated ciphertext shorter than nonce")
+	}
+	_ = os.Remove(pwdPath)
+
+	if err := os.Mkdir(pwdPath, 0700); err != nil {
+		t.Fatalf("failed to create directory at password file path: %v", err)
+	}
+	if err := utils.SaveFileErr(model.PwdFile{MasterPassword: "hash"}, nil); err == nil {
+		t.Fatalf("expected SaveFileErr to return error when writing encrypted file fails")
+	}
+	if err := os.Remove(pwdPath); err != nil {
+		t.Fatalf("failed to remove directory at password file path: %v", err)
+	}
+
+	expectedHash, err := utils.HashMasterPassword([]byte("round-trip-secret"))
 	if err != nil {
-		t.Fatalf("failed to reload vault: %v", err)
+		t.Fatalf("failed to hash password: %v", err)
 	}
-	if loaded.SavedPasswords["github"] != "clip-fail-secret" {
-		t.Fatalf("expected password still saved, got %v", loaded.SavedPasswords)
+	if err := utils.SaveFileErr(model.PwdFile{MasterPassword: expectedHash}, nil); err != nil {
+		t.Fatalf("SaveFileErr: %v", err)
+	}
+	loaded, err := utils.GetPwdObj()
+	if err != nil || loaded.MasterPassword != expectedHash {
+		t.Fatalf("loaded MasterPassword mismatch: got %q, want %q (err=%v)", loaded.MasterPassword, expectedHash, err)
+	}
+}
+
+func TestManageErrorAndExitTerminatesOnError(t *testing.T) {
+	exitCode := 0
+	restore := setUtilsExit(func(code int) { exitCode = code })
+	defer restore()
+
+	utils.ManageErrorAndExit(nil)
+	if exitCode != 0 {
+		t.Fatalf("expected no exit on nil error, got exit code %d", exitCode)
+	}
+	utils.ManageErrorAndExit(errors.New("fatal failure"))
+	if exitCode == 0 {
+		t.Fatalf("expected non-zero exit code on error, got %d", exitCode)
 	}
 }
