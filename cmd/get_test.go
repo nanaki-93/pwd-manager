@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"os"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -47,21 +48,59 @@ func captureStdout(t *testing.T, fn func()) string {
 	return buf.String()
 }
 
-func TestGetAndAddFlagsRegistered(t *testing.T) {
-	getFlag := getCmd.Flags().Lookup("copy")
-	if getFlag == nil || getFlag.Shorthand != "c" {
-		t.Fatalf("expected --copy / -c flag on getCmd, got %+v", getFlag)
+func captureGetStderr(t *testing.T, fn func()) string {
+	t.Helper()
+	f, err := os.CreateTemp(t.TempDir(), "stderr")
+	if err != nil {
+		t.Fatal(err)
 	}
-	if getFlag.DefValue != "false" {
-		t.Fatalf("expected default value 'false' for get --copy, got %q", getFlag.DefValue)
+	old := os.Stderr
+	defer func() {
+		os.Stderr = old
+		if err := f.Close(); err != nil {
+			t.Errorf("close stderr capture: %v", err)
+		}
+	}()
+	os.Stderr = f
+	fn()
+	data, err := os.ReadFile(f.Name())
+	if err != nil {
+		t.Fatal(err)
 	}
+	return string(data)
+}
 
-	addFlag := addCmd.Flags().Lookup("copy")
-	if addFlag == nil || addFlag.Shorthand != "c" {
-		t.Fatalf("expected --copy / -c flag on addCmd, got %+v", addFlag)
-	}
-	if addFlag.DefValue != "false" {
-		t.Fatalf("expected default value 'false' for add --copy, got %q", addFlag.DefValue)
+// stubRevealEnv sets the reveal flag and terminal detection for one test.
+func stubRevealEnv(t *testing.T, reveal, terminal bool) {
+	t.Helper()
+	origReveal, origTerm := getRevealFlag, stdoutIsTerminal
+	t.Cleanup(func() { getRevealFlag, stdoutIsTerminal = origReveal, origTerm })
+	getRevealFlag = reveal
+	stdoutIsTerminal = func() bool { return terminal }
+}
+
+// stubGetClearer swaps getClipboardClearer and getClearAfterFlag for the test.
+func stubGetClearer(t *testing.T, delay time.Duration, fn func(pwd string, d time.Duration) error) {
+	t.Helper()
+	origClearer, origDelay := getClipboardClearer, getClearAfterFlag
+	t.Cleanup(func() { getClipboardClearer, getClearAfterFlag = origClearer, origDelay })
+	getClipboardClearer, getClearAfterFlag = fn, delay
+}
+
+func TestGetAndAddFlagsRegistered(t *testing.T) {
+	for _, tc := range []struct {
+		cmd                 *cobra.Command
+		flag, short, defVal string
+	}{
+		{cmd: getCmd, flag: "copy", short: "c", defVal: "false"},
+		{cmd: addCmd, flag: "copy", short: "c", defVal: "false"},
+		{cmd: getCmd, flag: "clear-after", defVal: addClipboardClearDelay.String()},
+		{cmd: getCmd, flag: "reveal", defVal: "false"},
+	} {
+		f := tc.cmd.Flags().Lookup(tc.flag)
+		if f == nil || f.Shorthand != tc.short || f.DefValue != tc.defVal {
+			t.Errorf("%s --%s: want shorthand %q default %q, got %+v", tc.cmd.Name(), tc.flag, tc.short, tc.defVal, f)
+		}
 	}
 }
 
@@ -104,100 +143,232 @@ func TestGetAndAddCopyFlagParsing(t *testing.T) {
 	}
 }
 
-func TestHandleGetOutputDefault(t *testing.T) {
-	oldWrite := clipboardWriteAll
-	defer func() { clipboardWriteAll = oldWrite }()
+type flagState struct {
+	value   string
+	changed bool
+}
 
-	called := false
-	clipboardWriteAll = func(text string) error {
-		called = true
-		return nil
-	}
-
-	oldReveal := getRevealFlag
-	defer func() { getRevealFlag = oldReveal }()
-	getRevealFlag = true
-
-	passwords := map[string]string{"github": "s3cr3t"}
-	var gotErr error
-	out := captureStdout(t, func() {
-		gotErr = handleGetOutput("github", passwords, false)
+func snapshotFlagSet(fs *pflag.FlagSet) (bool, []string, map[string]flagState) {
+	states := map[string]flagState{}
+	fs.VisitAll(func(f *pflag.Flag) {
+		states[f.Name] = flagState{value: f.Value.String(), changed: f.Changed}
 	})
+	return fs.Parsed(), append([]string(nil), fs.Args()...), states
+}
 
-	if gotErr != nil {
-		t.Fatalf("expected nil error, got %v", gotErr)
+// TestGetAndAddCopyFlagParsingRestoresSharedState guards against
+// TestGetAndAddCopyFlagParsing leaking parse state into the package-level
+// getCmd/addCmd flag sets or resetting non-default values to their defaults.
+func TestGetAndAddCopyFlagParsingRestoresSharedState(t *testing.T) {
+	oldGet, oldAdd, oldName := getCopyFlag, addCopyFlag, nameFlag
+	t.Cleanup(func() { getCopyFlag, addCopyFlag, nameFlag = oldGet, oldAdd, oldName })
+	getCopyFlag, addCopyFlag, nameFlag = true, true, "existing name"
+
+	flagSets := map[string]*pflag.FlagSet{"get": getCmd.Flags(), "add": addCmd.Flags()}
+	type snap struct {
+		parsed bool
+		args   []string
+		states map[string]flagState
 	}
-	if called {
-		t.Fatalf("expected clipboard not to be called when copy flag is false")
+	take := func(fs *pflag.FlagSet) snap {
+		p, a, s := snapshotFlagSet(fs)
+		return snap{parsed: p, args: a, states: s}
 	}
-	if out != "github:s3cr3t" {
-		t.Fatalf("expected output 'github:s3cr3t', got %q", out)
+	before := map[string]snap{}
+	for name, fs := range flagSets {
+		before[name] = take(fs)
+	}
+
+	for i := 0; i < 2; i++ {
+		t.Run("parse", TestGetAndAddCopyFlagParsing)
+		if !getCopyFlag || !addCopyFlag || nameFlag != "existing name" {
+			t.Fatalf("iteration %d did not restore prior values: get=%v add=%v name=%q",
+				i, getCopyFlag, addCopyFlag, nameFlag)
+		}
+	}
+	for name, fs := range flagSets {
+		if after := take(fs); !reflect.DeepEqual(after, before[name]) {
+			t.Errorf("%s flag set state changed from %+v to %+v", name, before[name], after)
+		}
 	}
 }
 
-func TestHandleGetOutputCopySuccess(t *testing.T) {
-	oldWrite := clipboardWriteAll
-	defer func() { clipboardWriteAll = oldWrite }()
-
-	oldClearer := getClipboardClearer
-	defer func() { getClipboardClearer = oldClearer }()
-	cleared := ""
-	getClipboardClearer = func(pwd string, _ time.Duration) error {
-		cleared = pwd
-		return nil
+func TestParseFlagsIsolatedPreservesPreviouslyParsedState(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		args    []string
+		wantErr bool
+	}{
+		{name: "empty"},
+		{name: "explicit false", args: []string{"--copy=false", "--name=", "new operand"}},
+		{name: "error after valid flag", args: []string{"--name=temporary", "--unknown"}, wantErr: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cmd := &cobra.Command{Use: "isolated-test"}
+			var copyValue bool
+			var nameValue string
+			fs := cmd.Flags()
+			fs.BoolVarP(&copyValue, "copy", "c", false, "copy")
+			fs.StringVarP(&nameValue, "name", "n", "", "name")
+			if err := fs.Parse([]string{"-c", "-n", "prior", "original operand"}); err != nil {
+				t.Fatalf("seed flags: %v", err)
+			}
+			parsed, args, states := snapshotFlagSet(fs)
+			t.Run("isolated parse", func(t *testing.T) {
+				err := parseFlagsIsolated(t, cmd, tc.args)
+				if (err != nil) != tc.wantErr {
+					t.Fatalf("parse error = %v, want error %v", err, tc.wantErr)
+				}
+				if tc.name == "explicit false" && (copyValue || nameValue != "") {
+					t.Fatalf("explicit zero values not applied: copy=%v name=%q", copyValue, nameValue)
+				}
+			})
+			afterParsed, afterArgs, afterStates := snapshotFlagSet(fs)
+			if parsed != afterParsed || !reflect.DeepEqual(args, afterArgs) || !reflect.DeepEqual(states, afterStates) {
+				t.Errorf("shared flag state changed: parsed=%v args=%v states=%v; want parsed=%v args=%v states=%v",
+					afterParsed, afterArgs, afterStates, parsed, args, states)
+			}
+		})
 	}
+}
 
-	var copied string
-	clipboardWriteAll = func(text string) error {
-		copied = text
-		return nil
+func TestGetPrintsPasswordOnlyToTerminalOrWithReveal(t *testing.T) {
+	cases := []struct {
+		name            string
+		reveal, term    bool
+		copy, wantPrint bool
+		wantRevealError bool
+	}{
+		{name: "non-terminal without reveal", wantRevealError: true},
+		{name: "non-terminal with reveal", reveal: true, wantPrint: true},
+		{name: "terminal without reveal", term: true, wantPrint: true},
+		{name: "terminal with reveal", reveal: true, term: true, wantPrint: true},
+		{name: "copy non-terminal", copy: true},
+		{name: "copy with reveal", copy: true, reveal: true},
 	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			stubRevealEnv(t, tc.reveal, tc.term)
+			content := fakeClipboard(t, nil, nil)
+			stubGetClearer(t, time.Second, func(string, time.Duration) error { return nil })
 
-	passwords := map[string]string{"github": "s3cr3t"}
-	var gotErr error
+			var err error
+			out := captureStdout(t, func() {
+				err = handleGetOutput("github", map[string]string{"github": "s3cr3t"}, tc.copy)
+			})
+			if tc.wantRevealError != errors.Is(err, errRevealRequired) {
+				t.Fatalf("reveal error mismatch: got %v", err)
+			}
+			if !tc.wantRevealError && err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if err != nil && strings.Contains(err.Error(), "s3cr3t") {
+				t.Fatalf("error leaks the secret: %v", err)
+			}
+			if got := strings.Contains(out, "s3cr3t"); got != tc.wantPrint {
+				t.Fatalf("password printed=%v, want %v (stdout %q)", got, tc.wantPrint, out)
+			}
+			if tc.copy != (*content == "s3cr3t") || (tc.copy && out != "") {
+				t.Fatalf("copy=%v: clipboard holds %q, stdout %q", tc.copy, *content, out)
+			}
+		})
+	}
+}
+
+func TestGetRevealWarnsWithoutLeakingSecretToStderr(t *testing.T) {
+	stubRevealEnv(t, true, false)
+	var diagnostic string
 	out := captureStdout(t, func() {
-		gotErr = handleGetOutput("github", passwords, true)
+		diagnostic = captureGetStderr(t, func() {
+			if err := handleGetOutput("account", map[string]string{"account": "test-secret"}, false); err != nil {
+				t.Fatal(err)
+			}
+		})
 	})
+	if out != "account:test-secret" {
+		t.Fatalf("unexpected reveal output %q", out)
+	}
+	if !strings.Contains(diagnostic, "Warning:") || !strings.Contains(diagnostic, "plaintext") {
+		t.Fatalf("missing plaintext warning: %q", diagnostic)
+	}
+	if strings.Contains(diagnostic, "test-secret") {
+		t.Fatalf("stderr must not contain the password: %q", diagnostic)
+	}
+}
 
-	if gotErr != nil {
-		t.Fatalf("expected nil error, got %v", gotErr)
+// An empty-valued entry is present, not a failed lookup; empty stores and
+// missing names fail without output, clipboard writes or leaked secrets.
+func TestHandleGetOutputLookup(t *testing.T) {
+	stubRevealEnv(t, true, false)
+	oldWrite := clipboardWriteAll
+	t.Cleanup(func() { clipboardWriteAll = oldWrite })
+	clipboardWriteAll = func(string) error {
+		t.Fatalf("clipboard must not be touched when the lookup fails")
+		return nil
 	}
-	if cleared != "s3cr3t" {
-		t.Fatalf("expected clipboard clear to be scheduled for the copied password, got %q", cleared)
+
+	const emptyMsg = "get password 'github': the password store is empty; add one with 'pwd-manager add'"
+	for _, tc := range []struct {
+		name, key string
+		saved     map[string]string
+		copy      bool
+		wantErr   error
+		wantMsg   string
+		wantOut   string
+	}{
+		{name: "nil store", key: "github", wantErr: errEmptyPasswordStore, wantMsg: emptyMsg},
+		{name: "empty store copy", key: "github", saved: map[string]string{}, copy: true, wantErr: errEmptyPasswordStore, wantMsg: emptyMsg},
+		{name: "missing key", key: "gitlab", saved: map[string]string{"github": "s3cr3t"}, wantErr: errPasswordNotFound, wantMsg: "get password 'gitlab': password not found"},
+		{name: "missing key copy", key: "gitlab", saved: map[string]string{"github": "s3cr3t"}, copy: true, wantErr: errPasswordNotFound, wantMsg: "get password 'gitlab': password not found"},
+		{name: "only other empty entry", key: "missing", saved: map[string]string{"other": ""}, wantErr: errPasswordNotFound, wantMsg: "get password 'missing': password not found"},
+		{name: "existing empty key and value", key: "", saved: map[string]string{"": ""}, wantOut: ":"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var err error
+			out := captureStdout(t, func() {
+				err = handleGetOutput(tc.key, tc.saved, tc.copy)
+			})
+			if !errors.Is(err, tc.wantErr) || (err != nil && err.Error() != tc.wantMsg) {
+				t.Fatalf("expected %v with message %q, got %v", tc.wantErr, tc.wantMsg, err)
+			}
+			if out != tc.wantOut {
+				t.Fatalf("stdout = %q, want %q", out, tc.wantOut)
+			}
+		})
 	}
-	if copied != "s3cr3t" {
-		t.Fatalf("expected 's3cr3t' copied to clipboard, got %q", copied)
-	}
-	if strings.Contains(out, "s3cr3t") {
-		t.Fatalf("expected secret not to be printed to stdout, got %q", out)
+}
+
+func TestCopyPasswordToClipboard(t *testing.T) {
+	content := fakeClipboard(t, nil, nil)
+	out := captureStdout(t, func() {
+		if err := copyPasswordToClipboard("new-pass-123"); err != nil {
+			t.Fatalf("expected nil error, got %v", err)
+		}
+	})
+	if *content != "new-pass-123" {
+		t.Fatalf("expected 'new-pass-123' written to clipboard, got %q", *content)
 	}
 	if out != "" {
-		t.Fatalf("expected empty stdout when copying to clipboard, got %q", out)
+		t.Fatalf("expected no output on success, got %q", out)
 	}
 }
 
 func TestHandleGetOutputCopyError(t *testing.T) {
 	oldWrite := clipboardWriteAll
 	defer func() { clipboardWriteAll = oldWrite }()
-
 	clipErr := errors.New("clipboard unavailable")
-	clipboardWriteAll = func(text string) error {
-		return clipErr
-	}
+	clipboardWriteAll = func(string) error { return clipErr }
 
-	passwords := map[string]string{"github": "s3cr3t"}
 	var gotErr error
 	out := captureStdout(t, func() {
-		gotErr = handleGetOutput("github", passwords, true)
+		gotErr = handleGetOutput("github", map[string]string{"github": "s3cr3t"}, true)
 	})
 
-	if !errors.Is(gotErr, clipErr) {
+	const wantMsg = "failed to copy password to clipboard: clipboard unavailable"
+	if !errors.Is(gotErr, clipErr) || !strings.Contains(gotErr.Error(), wantMsg) {
 		t.Fatalf("expected error wrapping %v, got %v", clipErr, gotErr)
 	}
-	if !strings.Contains(gotErr.Error(), "failed to copy password to clipboard: clipboard unavailable") {
-		t.Fatalf("expected wrapped error message, got %q", gotErr.Error())
-	}
-	if !strings.Contains(out, "failed to copy password to clipboard: clipboard unavailable") {
+	if !strings.Contains(out, wantMsg) {
 		t.Fatalf("expected clear error message, got %q", out)
 	}
 	if strings.Contains(out, "s3cr3t") {
@@ -205,89 +376,87 @@ func TestHandleGetOutputCopyError(t *testing.T) {
 	}
 }
 
-func TestHandleGetOutputEmptyAndMissingKeys(t *testing.T) {
-	oldWrite := clipboardWriteAll
-	defer func() { clipboardWriteAll = oldWrite }()
-
-	called := false
-	clipboardWriteAll = func(text string) error {
-		called = true
-		return nil
-	}
-
-	var gotErr error
-	for _, saved := range []map[string]string{{}, nil} {
-		out := captureStdout(t, func() {
-			gotErr = handleGetOutput("github", saved, true)
-		})
-		if !errors.Is(gotErr, errEmptyPasswordStore) || !strings.Contains(gotErr.Error(), "github") {
-			t.Fatalf("expected empty-store error naming 'github', got %v", gotErr)
+func TestGetCopyClearsPasswordAfterConfiguredDelay(t *testing.T) {
+	content := fakeClipboard(t, nil, nil)
+	var gotDelay time.Duration
+	stubGetClearer(t, 3*time.Second, func(pwd string, d time.Duration) error {
+		gotDelay = d
+		if *content != pwd {
+			t.Fatalf("clear must run after copy, clipboard=%q", *content)
 		}
-		if called {
-			t.Fatalf("expected clipboard not to be called when savedPasswords is empty")
-		}
-		if out != "" {
-			t.Fatalf("expected no stdout output (the caller reports the error), got %q", out)
-		}
-	}
-
-	outMissing := captureStdout(t, func() {
-		gotErr = handleGetOutput("gitlab", map[string]string{"github": "s3cr3t"}, true)
+		return verifyAndClearClipboard(pwd)
 	})
-	if !errors.Is(gotErr, errPasswordNotFound) || !strings.Contains(gotErr.Error(), "gitlab") {
-		t.Fatalf("expected not-found error naming 'gitlab', got %v", gotErr)
+
+	err := handleGetOutput("github", map[string]string{"github": "s3cr3t"}, true)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
 	}
-	if strings.Contains(gotErr.Error(), "s3cr3t") {
-		t.Fatalf("expected error not to leak saved secrets, got %v", gotErr)
+	if gotDelay != 3*time.Second {
+		t.Fatalf("expected configured delay 3s, got %v", gotDelay)
 	}
-	if called {
-		t.Fatalf("expected clipboard not to be called when key is missing")
-	}
-	if outMissing != "" {
-		t.Fatalf("expected no stdout output for missing key, got %q", outMissing)
+	if *content != "" {
+		t.Fatalf("expected clipboard cleared after get --copy, still holds %q", *content)
 	}
 }
 
-func TestCopyPasswordToClipboard(t *testing.T) {
-	oldWrite := clipboardWriteAll
-	defer func() { clipboardWriteAll = oldWrite }()
+func TestGetCopyLeavesClipboardChangedByUser(t *testing.T) {
+	content := fakeClipboard(t, nil, nil)
+	stubGetClearer(t, time.Second, func(pwd string, _ time.Duration) error {
+		*content = "user copied this"
+		return verifyAndClearClipboard(pwd)
+	})
 
-	var got string
-	clipboardWriteAll = func(text string) error {
-		got = text
+	if err := handleGetOutput("github", map[string]string{"github": "s3cr3t"}, true); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if *content != "user copied this" {
+		t.Fatalf("expected clipboard left alone, got %q", *content)
+	}
+}
+
+func TestGetCopyRejectsNonPositiveDelayBeforeCopy(t *testing.T) {
+	content := fakeClipboard(t, nil, nil)
+	stubGetClearer(t, 0, func(string, time.Duration) error {
+		t.Fatalf("clearer must not run for an invalid delay")
 		return nil
-	}
+	})
 
-	out := captureStdout(t, func() {
-		if err := copyPasswordToClipboard("new-pass-123"); err != nil {
-			t.Fatalf("expected nil error, got %v", err)
+	err := handleGetOutput("github", map[string]string{"github": "s3cr3t"}, true)
+	if !errors.Is(err, errInvalidClearAfter) {
+		t.Fatalf("expected errInvalidClearAfter, got %v", err)
+	}
+	if *content != "" {
+		t.Fatalf("expected nothing copied, clipboard holds %q", *content)
+	}
+}
+
+func TestGetCopyReportsClearFailure(t *testing.T) {
+	fakeClipboard(t, nil, nil)
+	clearErr := errors.New("clear failed")
+	stubGetClearer(t, time.Second, func(string, time.Duration) error { return clearErr })
+
+	err := handleGetOutput("github", map[string]string{"github": "s3cr3t"}, true)
+	if !errors.Is(err, clearErr) || strings.Contains(err.Error(), "s3cr3t") {
+		t.Fatalf("expected wrapped clear error without secret, got %v", err)
+	}
+}
+
+func TestGetClipboardClearAnnouncesDelayAndActuallyExpires(t *testing.T) {
+	content := fakeClipboard(t, nil, nil)
+	*content = "test-secret"
+	// An already-due timer exercises the timer branch without sleeps or signals.
+	diagnostic := captureGetStderr(t, func() {
+		if err := clearCopiedPasswordAfter("test-secret", time.Nanosecond); err != nil {
+			t.Fatal(err)
 		}
 	})
-	if got != "new-pass-123" {
-		t.Fatalf("expected 'new-pass-123' written to clipboard, got %q", got)
+	if *content != "" {
+		t.Fatal("expired clipboard entry was not cleared")
 	}
-	if out != "" {
-		t.Fatalf("expected no output on success, got %q", out)
+	if !strings.Contains(diagnostic, "1ns") || !strings.Contains(diagnostic, "cleared") {
+		t.Fatalf("missing configured expiry diagnostic: %q", diagnostic)
 	}
-
-	clipErr := errors.New("no display")
-	clipboardWriteAll = func(text string) error {
-		return clipErr
-	}
-	var gotErr error
-	outErr := captureStdout(t, func() {
-		gotErr = copyPasswordToClipboard("new-pass-123")
-		if gotErr == nil {
-			t.Fatalf("expected error when clipboard write fails")
-		}
-	})
-	if !errors.Is(gotErr, clipErr) {
-		t.Fatalf("expected error wrapping %v, got %v", clipErr, gotErr)
-	}
-	if !strings.Contains(outErr, "failed to copy password to clipboard: no display") {
-		t.Fatalf("expected clear error message, got %q", outErr)
-	}
-	if strings.Contains(outErr, "new-pass-123") {
-		t.Fatalf("expected secret not to appear in error output, got %q", outErr)
+	if strings.Contains(diagnostic, "test-secret") {
+		t.Fatalf("expiry diagnostic contains password: %q", diagnostic)
 	}
 }
