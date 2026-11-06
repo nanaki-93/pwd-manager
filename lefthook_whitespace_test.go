@@ -19,29 +19,60 @@ func whitespaceGlobPatterns(t *testing.T) []string {
 	if err != nil {
 		t.Fatalf("read lefthook.yml: %v", err)
 	}
-	inWhitespace := false
-	for _, line := range strings.Split(string(data), "\n") {
-		trimmed := strings.TrimSpace(line)
-		if trimmed == "whitespace:" {
-			inWhitespace = true
-			continue
-		}
-		if !inWhitespace || !strings.HasPrefix(trimmed, "glob:") {
-			continue
-		}
-		glob := strings.Trim(strings.TrimSpace(strings.TrimPrefix(trimmed, "glob:")), `"'`)
-		open, closing := strings.Index(glob, "{"), strings.Index(glob, "}")
-		if open < 0 || closing < open {
-			return []string{glob}
-		}
-		var patterns []string
-		for _, alt := range strings.Split(glob[open+1:closing], ",") {
-			patterns = append(patterns, glob[:open]+alt+glob[closing+1:])
-		}
-		return patterns
+	glob, err := whitespaceGlob(string(data))
+	if err != nil {
+		t.Fatalf("lefthook.yml: %v", err)
 	}
-	t.Fatal("no glob found for the whitespace command in lefthook.yml")
-	return nil
+	open, closing := strings.Index(glob, "{"), strings.Index(glob, "}")
+	if open < 0 || closing < open {
+		return []string{glob}
+	}
+	var patterns []string
+	for _, alt := range strings.Split(glob[open+1:closing], ",") {
+		patterns = append(patterns, glob[:open]+alt+glob[closing+1:])
+	}
+	return patterns
+}
+
+// whitespaceGlob returns the `glob:` value inside the `whitespace:` command
+// block, stopping at the next line indented no deeper than `whitespace:`.
+func whitespaceGlob(config string) (string, error) {
+	blockIndent := -1
+	for _, line := range strings.Split(config, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" {
+			continue
+		}
+		indent := len(line) - len(strings.TrimLeft(line, " "))
+		if blockIndent < 0 {
+			if trimmed == "whitespace:" {
+				blockIndent = indent
+			}
+			continue
+		}
+		if indent <= blockIndent {
+			break
+		}
+		if strings.HasPrefix(trimmed, "glob:") {
+			return strings.Trim(strings.TrimSpace(strings.TrimPrefix(trimmed, "glob:")), `"'`), nil
+		}
+	}
+	return "", errors.New("no glob found inside the whitespace command block")
+}
+
+func TestWhitespaceGlobIgnoresLaterCommandGlob(t *testing.T) {
+	config := "pre-commit:\n  commands:\n    whitespace:\n      run: git diff --check\n    gitleaks:\n      glob: \"*.go\"\n"
+	if glob, err := whitespaceGlob(config); err == nil {
+		t.Fatalf("whitespaceGlob = %q, want error for whitespace block without glob", glob)
+	}
+}
+
+func TestWhitespaceGlobReadsOwnBlock(t *testing.T) {
+	config := "pre-commit:\n  commands:\n    whitespace:\n      glob: \"*.{go,yml}\"\n      run: x\n    gitleaks:\n      glob: \"*\"\n"
+	glob, err := whitespaceGlob(config)
+	if err != nil || glob != "*.{go,yml}" {
+		t.Fatalf("whitespaceGlob = %q, %v; want \"*.{go,yml}\"", glob, err)
+	}
 }
 
 func whitespaceGlobMatches(t *testing.T, name string) bool {
