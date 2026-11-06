@@ -1,7 +1,6 @@
 package cmd
 
 import (
-	"context"
 	"errors"
 	"strings"
 	"testing"
@@ -49,11 +48,11 @@ func TestAddPromptedPasswordWipesOnClearFailureAndKeepsSavedValue(t *testing.T) 
 	}
 }
 
-func TestClearClipboardAfterPreservesBothFailures(t *testing.T) {
+func TestVerifyAndClearClipboardPreservesBothFailures(t *testing.T) {
 	readErr, writeErr := errors.New("read failed"), errors.New("write failed")
 	content := fakeClipboard(t, readErr, writeErr)
 	*content = "dummy-secret"
-	err := clearClipboardAfter(context.Background(), "dummy-secret", 0)
+	err := verifyAndClearClipboard("dummy-secret")
 	if !errors.Is(err, readErr) || !errors.Is(err, writeErr) {
 		t.Fatalf("expected both clipboard failures wrapped, got %v", err)
 	}

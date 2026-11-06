@@ -90,13 +90,6 @@ func waitClipboardClear(ctx context.Context, delay time.Duration) {
 	}
 }
 
-// clearClipboardAfter waits for delay or ctx cancellation, then clears the
-// clipboard if it still holds pwd (see verifyAndClearClipboard).
-func clearClipboardAfter(ctx context.Context, pwd string, delay time.Duration) error {
-	waitClipboardClear(ctx, delay)
-	return verifyAndClearClipboard(pwd)
-}
-
 // verifyAndClearClipboard clears the clipboard if it still holds pwd. If the
 // clipboard cannot be read, it is cleared without verification and the read
 // failure is returned.

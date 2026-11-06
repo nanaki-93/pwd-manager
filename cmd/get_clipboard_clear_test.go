@@ -1,7 +1,6 @@
 package cmd
 
 import (
-	"context"
 	"errors"
 	"strings"
 	"testing"
@@ -16,14 +15,6 @@ func stubGetClearer(t *testing.T, delay time.Duration, fn func(pwd string, d tim
 	getClipboardClearer, getClearAfterFlag = fn, delay
 }
 
-// expiredCtx stands in for a timer that has already fired, so the clear runs
-// deterministically without waiting for the (hour-long) delay.
-func expiredCtx() context.Context {
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-	return ctx
-}
-
 func TestGetCopyClearsPasswordAfterConfiguredDelay(t *testing.T) {
 	content := fakeClipboard(t, nil, nil)
 	var gotDelay time.Duration
@@ -32,7 +23,7 @@ func TestGetCopyClearsPasswordAfterConfiguredDelay(t *testing.T) {
 		if *content != pwd {
 			t.Fatalf("clear must run after copy, clipboard=%q", *content)
 		}
-		return clearClipboardAfter(expiredCtx(), pwd, time.Hour)
+		return verifyAndClearClipboard(pwd)
 	})
 
 	err := handleGetOutput("github", map[string]string{"github": "s3cr3t"}, true)
@@ -51,7 +42,7 @@ func TestGetCopyLeavesClipboardChangedByUser(t *testing.T) {
 	content := fakeClipboard(t, nil, nil)
 	stubGetClearer(t, time.Second, func(pwd string, _ time.Duration) error {
 		*content = "user copied this"
-		return clearClipboardAfter(expiredCtx(), pwd, time.Hour)
+		return verifyAndClearClipboard(pwd)
 	})
 
 	if err := handleGetOutput("github", map[string]string{"github": "s3cr3t"}, true); err != nil {

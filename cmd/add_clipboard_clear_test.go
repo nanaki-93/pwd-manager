@@ -1,11 +1,9 @@
 package cmd
 
 import (
-	"context"
 	"errors"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/nanaki-93/pwd-manager/internal/model"
 )
@@ -36,7 +34,7 @@ func TestAddPromptedPasswordClearsCopiedPassword(t *testing.T) {
 		if *content != pwd {
 			t.Fatalf("clearer must run after copy, clipboard=%q", *content)
 		}
-		return clearClipboardAfter(context.Background(), pwd, time.Millisecond)
+		return verifyAndClearClipboard(pwd)
 	}
 
 	pwdObj := model.PwdFile{SavedPasswords: map[string]string{}}
@@ -62,7 +60,7 @@ func TestAddPromptedPasswordReportsClearFailure(t *testing.T) {
 	}
 }
 
-func TestClearClipboardAfter(t *testing.T) {
+func TestVerifyAndClearClipboard(t *testing.T) {
 	readErr := errors.New("read failed")
 	writeErr := errors.New("write failed")
 	for _, tc := range []struct {
@@ -70,28 +68,19 @@ func TestClearClipboardAfter(t *testing.T) {
 		initial    string
 		readErr    error
 		writeErr   error
-		cancel     bool
 		want       string
 		wantErr    error
 		wantNilErr bool
 	}{
 		{name: "clears when still holding secret", initial: "s3cret", want: "", wantNilErr: true},
 		{name: "keeps value the user copied since", initial: "other", want: "other", wantNilErr: true},
-		{name: "cancellation clears immediately", initial: "s3cret", cancel: true, want: "", wantNilErr: true},
 		{name: "unreadable clipboard cleared anyway", initial: "s3cret", readErr: readErr, want: "", wantErr: readErr},
 		{name: "clear failure reported", initial: "s3cret", writeErr: writeErr, want: "s3cret", wantErr: writeErr},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			content := fakeClipboard(t, tc.readErr, tc.writeErr)
 			*content = tc.initial
-			ctx, cancel := context.WithCancel(context.Background())
-			defer cancel()
-			delay := time.Millisecond
-			if tc.cancel {
-				cancel()
-				delay = time.Hour
-			}
-			err := clearClipboardAfter(ctx, "s3cret", delay)
+			err := verifyAndClearClipboard("s3cret")
 			if tc.wantNilErr && err != nil || !tc.wantNilErr && !errors.Is(err, tc.wantErr) {
 				t.Fatalf("expected error %v, got %v", tc.wantErr, err)
 			}
