@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -158,13 +159,50 @@ func TestLefthookWhitespaceStagedFiles(t *testing.T) {
 			cmd := exec.CommandContext(ctx, "/bin/sh", "-c", script)
 			cmd.Dir = dir
 			out, err := cmd.CombinedOutput()
-			var exitErr *exec.ExitError
-			if err != nil && !errors.As(err, &exitErr) {
-				t.Fatalf("execute whitespace command: %v", err)
-			}
-			if (err != nil) != tc.wantErr {
-				t.Fatalf("whitespace error = %v, want failure %v; output: %s", err, tc.wantErr, out)
+			if problem := checkWhitespaceResult(out, err, tc.wantErr, "main.go"); problem != nil {
+				t.Fatal(problem)
 			}
 		})
+	}
+}
+
+// checkWhitespaceResult reports whether the whitespace command's outcome
+// matches wantErr; an expected failure must be a real check failure naming
+// the offending file, not a shell exit 126/127 from a command that cannot run.
+func checkWhitespaceResult(out []byte, err error, wantErr bool, offending string) error {
+	var exitErr *exec.ExitError
+	if err != nil && !errors.As(err, &exitErr) {
+		return fmt.Errorf("execute whitespace command: %w", err)
+	}
+	if (err != nil) != wantErr {
+		return fmt.Errorf("whitespace error = %v, want failure %v; output: %s", err, wantErr, out)
+	}
+	if !wantErr {
+		return nil
+	}
+	if code := exitErr.ExitCode(); code == 126 || code == 127 {
+		return fmt.Errorf("whitespace command could not run (exit %d); output: %s", code, out)
+	}
+	if !strings.Contains(string(out), offending) {
+		return fmt.Errorf("whitespace failure output does not name %s; output: %s", offending, out)
+	}
+	return nil
+}
+
+func TestCheckWhitespaceResultRejectsMissingCommand(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, "/bin/sh", "-c", "no-such-whitespace-checker main.go").CombinedOutput()
+	if problem := checkWhitespaceResult(out, err, true, "main.go"); problem == nil {
+		t.Fatalf("checkWhitespaceResult accepted a missing command (err %v, output %s) as a whitespace failure", err, out)
+	}
+}
+
+func TestCheckWhitespaceResultRequiresOffendingFile(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, "/bin/sh", "-c", "echo other.go; exit 2").CombinedOutput()
+	if problem := checkWhitespaceResult(out, err, true, "main.go"); problem == nil {
+		t.Fatalf("checkWhitespaceResult accepted output %q that does not name main.go", out)
 	}
 }
