@@ -16,7 +16,16 @@ import (
 	"github.com/nanaki-93/pwd-manager/internal/model"
 )
 
-const testHigherPBKDF2Iter = 1000000
+// testHigherPBKDF2Iter is the smallest work factor strictly above pbkdf2Iter,
+// so the higher-work-factor tests add only one iteration per derivation.
+const testHigherPBKDF2Iter = pbkdf2Iter + 1
+
+func TestHigherPBKDF2IterFixtureIsMinimal(t *testing.T) {
+	if testHigherPBKDF2Iter != pbkdf2Iter+1 {
+		t.Fatalf("testHigherPBKDF2Iter = %d, want pbkdf2Iter+1 (%d) to keep unlock tests cheap",
+			testHigherPBKDF2Iter, pbkdf2Iter+1)
+	}
+}
 
 func hashAtIterations(password []byte, iter int) string {
 	salt := bytes.Repeat([]byte{0x17}, saltSize)
