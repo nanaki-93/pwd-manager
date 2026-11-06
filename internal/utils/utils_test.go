@@ -5,6 +5,7 @@ package utils
 
 import (
 	"bytes"
+	"context"
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/binary"
@@ -15,9 +16,11 @@ import (
 	"go/parser"
 	"go/token"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/nanaki-93/pwd-manager/internal/model"
 	"golang.org/x/crypto/pbkdf2"
@@ -25,23 +28,93 @@ import (
 
 // Pin the requested production-code deletion without calling the obsolete API.
 func TestUtilsRemovesUnusedFunctions(t *testing.T) {
-	file, err := parser.ParseFile(token.NewFileSet(), "utils.go", nil, 0)
-	if err != nil {
-		t.Fatalf("parse utils.go: %v", err)
-	}
-	declared := make(map[string]bool)
-	for _, decl := range file.Decls {
-		if fn, ok := decl.(*ast.FuncDecl); ok && fn.Recv == nil {
-			declared[fn.Name.Name] = true
-		}
-	}
+	declared := productionFuncDecls(t, ".")
 	for _, name := range []string{
 		"SetExitFunc", "SetReadPasswordStdin", "chdirHome",
 		"GoToHomeDir", "readPwdFile", "SaveFile",
 	} {
 		t.Run(name, func(t *testing.T) {
-			if declared[name] {
-				t.Errorf("unused function %s remains in utils.go", name)
+			if path, ok := declared[name]; ok {
+				t.Errorf("unused function %s remains in %s", name, path)
+			}
+		})
+	}
+}
+
+// productionFuncDecls maps each receiver-less function declared in the
+// non-test Go files of dir to the file that declares it.
+func productionFuncDecls(t *testing.T, dir string) map[string]string {
+	t.Helper()
+	paths, err := filepath.Glob(filepath.Join(dir, "*.go"))
+	if err != nil {
+		t.Fatalf("list Go files in %s: %v", dir, err)
+	}
+	declared := make(map[string]string)
+	fset := token.NewFileSet()
+	for _, path := range paths {
+		if strings.HasSuffix(path, "_test.go") {
+			continue
+		}
+		file, err := parser.ParseFile(fset, path, nil, 0)
+		if err != nil {
+			t.Fatalf("parse %s: %v", path, err)
+		}
+		for _, decl := range file.Decls {
+			if fn, ok := decl.(*ast.FuncDecl); ok && fn.Recv == nil {
+				declared[fn.Name.Name] = path
+			}
+		}
+	}
+	if len(declared) == 0 {
+		t.Fatalf("no production functions found in %s", dir)
+	}
+	return declared
+}
+
+// Run the real guard in isolated directories, including its fatal-error paths.
+func TestUtilsRemovesUnusedFunctionsPackageScope(t *testing.T) {
+	binary, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cases := []struct {
+		name, file, source, want string
+	}{
+		{"test files ignored", "hooks_test.go", "not valid Go", ""},
+		{"non Go files ignored", "hooks.txt", "not valid Go", ""},
+		{"methods ignored", "methods.go", "package utils\ntype T struct{}\nfunc (T) SaveFile() {}", ""},
+		{"parse error path", "broken.go", "package utils\nfunc (", "parse broken.go:"},
+	}
+	for _, name := range []string{"SetExitFunc", "SetReadPasswordStdin", "chdirHome", "GoToHomeDir", "readPwdFile", "SaveFile"} {
+		cases = append(cases, struct{ name, file, source, want string }{
+			name, "hooks.go", "package utils\nfunc " + name + "() {}",
+			"unused function " + name + " remains in hooks.go",
+		})
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			for file, source := range map[string]string{
+				"utils.go": "package utils\nfunc retained() {}", tc.file: tc.source,
+			} {
+				if err := os.WriteFile(filepath.Join(dir, file), []byte(source), 0600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			cmd := exec.CommandContext(ctx, binary, "-test.run=^TestUtilsRemovesUnusedFunctions$")
+			cmd.Dir = dir
+			output, err := cmd.CombinedOutput()
+			if ctx.Err() != nil {
+				t.Fatalf("guard subprocess: %v", ctx.Err())
+			}
+			if tc.want == "" {
+				if err != nil {
+					t.Fatalf("guard rejected ignored declaration: %v\n%s", err, output)
+				}
+			} else if err == nil || !strings.Contains(string(output), tc.want) {
+				t.Fatalf("guard error = %v, output = %s; want failure containing %q", err, output, tc.want)
 			}
 		})
 	}
