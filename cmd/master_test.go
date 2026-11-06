@@ -2,6 +2,8 @@ package cmd
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/binary"
 	"errors"
 	"io"
 	"os"
@@ -12,6 +14,7 @@ import (
 
 	"github.com/nanaki-93/pwd-manager/internal/model"
 	"github.com/nanaki-93/pwd-manager/internal/utils"
+	"golang.org/x/crypto/pbkdf2"
 )
 
 func init() {
@@ -131,6 +134,21 @@ func assertWeakPasswordRejected(t *testing.T, tmpHome, candidate, wantErr string
 	}
 }
 
+const minAcceptedKDFIterations = 600_000
+
+func readStoredSaltParams(t *testing.T, tmpHome string) (int, []byte) {
+	t.Helper()
+	data, err := os.ReadFile(filepath.Join(tmpHome, keyDerivationSaltFile))
+	if err != nil {
+		t.Fatalf("read salt file: %v", err)
+	}
+	if len(data) != len(keySaltMagic)+4+keyDerivationSaltLen || !bytes.HasPrefix(data, []byte(keySaltMagic)) {
+		t.Fatalf("salt file does not record KDF parameters: %x", data)
+	}
+	iter := int(binary.BigEndian.Uint32(data[len(keySaltMagic) : len(keySaltMagic)+4]))
+	return iter, data[len(keySaltMagic)+4:]
+}
+
 func fillSyntheticSecret(dst []byte, seed byte) {
 	for i := range dst {
 		dst[i] = byte('!' + (int(seed)+i*13)%90)
@@ -186,6 +204,121 @@ func TestWriteKeySaltBoundaryAndErrorPaths(t *testing.T) {
 	}
 }
 
+func TestWriteKeySaltRefusesSymlinkAndKeepsTarget(t *testing.T) {
+	home := withTempHome(t)
+	target := filepath.Join(t.TempDir(), "victim")
+	orig := []byte("do not overwrite")
+	if err := os.WriteFile(target, orig, 0o600); err != nil {
+		t.Fatalf("write target: %v", err)
+	}
+	if err := os.Symlink(target, filepath.Join(home, keyDerivationSaltFile)); err != nil {
+		t.Fatalf("symlink salt: %v", err)
+	}
+	if err := writeKeySalt(bytes.Repeat([]byte{2}, keyDerivationSaltLen)); err == nil {
+		t.Fatal("expected writeKeySalt to refuse a symlinked salt path")
+	}
+	got, err := os.ReadFile(target)
+	if err != nil || !bytes.Equal(got, orig) {
+		t.Fatalf("symlink target changed: %q, %v", got, err)
+	}
+}
+
+func TestWriteKeySaltWrapsTemporaryFileFailure(t *testing.T) {
+	home := withTempHome(t)
+	missingHome := filepath.Join(home, "missing")
+	original := userHomeDir
+	userHomeDir = func() (string, error) { return missingHome, nil }
+	t.Cleanup(func() { userHomeDir = original })
+	err := writeKeySalt(bytes.Repeat([]byte{2}, keyDerivationSaltLen))
+	if !errors.Is(err, os.ErrNotExist) || !strings.Contains(err.Error(), "write salt file: create temp file:") {
+		t.Fatalf("missing wrapped salt persistence context: %v", err)
+	}
+	if entries, err := os.ReadDir(home); err != nil || len(entries) != 0 {
+		t.Fatalf("expected no files in home after failed write, got %d entries (err=%v)", len(entries), err)
+	}
+}
+
+// A failed open, or a symlink swapped in after the regular-file check, is
+// refused without touching the caller's salt buffer.
+func TestReadKeySaltRefusesFailedOrSwappedOpen(t *testing.T) {
+	cause := errors.New("injected open failure")
+	cases := []struct {
+		name    string
+		open    func(t *testing.T, prev func(string) (*os.File, error), name string) (*os.File, error)
+		wantErr func(error) bool
+	}{
+		{"open failure", func(*testing.T, func(string) (*os.File, error), string) (*os.File, error) {
+			return nil, cause
+		}, func(err error) bool { return errors.Is(err, cause) && strings.Contains(err.Error(), "open salt file:") }},
+		{"symlink swapped in", swapSaltForSymlink, func(err error) bool {
+			return err != nil && strings.Contains(err.Error(), "not a regular file")
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			home := withTempHome(t)
+			if err := os.WriteFile(filepath.Join(home, keyDerivationSaltFile), bytes.Repeat([]byte{1}, keyDerivationSaltLen), 0o600); err != nil {
+				t.Fatalf("write salt: %v", err)
+			}
+			prev := openKeyFile
+			openKeyFile = func(name string) (*os.File, error) { return tc.open(t, prev, name) }
+			t.Cleanup(func() { openKeyFile = prev })
+			salt := bytes.Repeat([]byte{7}, keyDerivationSaltLen)
+			iterations, loaded, err := readKeySalt(salt)
+			if !tc.wantErr(err) {
+				t.Fatalf("unexpected readKeySalt error: %v", err)
+			}
+			if loaded || iterations != 0 || !bytes.Equal(salt, bytes.Repeat([]byte{7}, keyDerivationSaltLen)) {
+				t.Fatalf("failed read changed caller output: loaded=%v iterations=%d", loaded, iterations)
+			}
+		})
+	}
+}
+
+// swapSaltForSymlink simulates the race: it replaces the checked salt file
+// with a symlink to another file before opening it.
+func swapSaltForSymlink(t *testing.T, prev func(string) (*os.File, error), name string) (*os.File, error) {
+	target := filepath.Join(t.TempDir(), "other")
+	if err := os.WriteFile(target, bytes.Repeat([]byte{9}, keyDerivationSaltLen), 0o600); err != nil {
+		t.Fatalf("write target: %v", err)
+	}
+	if err := os.Remove(name); err != nil {
+		t.Fatalf("remove salt: %v", err)
+	}
+	if err := os.Symlink(target, name); err != nil {
+		t.Fatalf("symlink salt: %v", err)
+	}
+	return prev(name)
+}
+
+func TestParseKeySaltRejectsOutOfRangeIterations(t *testing.T) {
+	for _, iter := range []uint32{0, legacyKeyDerivationIterations - 1, maxKeyDerivationIterations + 1} {
+		data := binary.BigEndian.AppendUint32([]byte(keySaltMagic), iter)
+		data = append(data, make([]byte, keyDerivationSaltLen)...)
+		if _, _, err := parseKeySalt(data, keyDerivationSaltLen); err == nil {
+			t.Fatalf("parseKeySalt accepted %d iterations", iter)
+		}
+	}
+}
+
+// deriveKey runs PBKDF2-HMAC-SHA256 at the given count; the default count is
+// the strong 600,000-iteration work factor, not the legacy one.
+func TestDeriveKeyMatchesPBKDF2AtGivenIterations(t *testing.T) {
+	useRealKDF(t)
+	password := []byte("valid-master-secret")
+	salt := bytes.Repeat([]byte{0x5c}, keyDerivationSaltLen)
+	cases := []struct{ given, want int }{
+		{keyDerivationIterations, minAcceptedKDFIterations},
+		{legacyKeyDerivationIterations, legacyKeyDerivationIterations},
+	}
+	for _, tc := range cases {
+		got, err := deriveKey(password, salt, tc.given)
+		if err != nil || !bytes.Equal(got, pbkdf2.Key(password, salt, tc.want, encryptionKeyLen, sha256.New)) {
+			t.Fatalf("deriveKey(%d iterations) does not match PBKDF2 at %d (err=%v)", tc.given, tc.want, err)
+		}
+	}
+}
+
 func TestDeriveKeyValidationBoundaries(t *testing.T) {
 	saltA := bytes.Repeat([]byte{0x11}, 32)
 	saltB := bytes.Repeat([]byte{0x22}, 32)
@@ -198,6 +331,11 @@ func TestDeriveKeyValidationBoundaries(t *testing.T) {
 	if _, err := deriveKey([]byte("valid-master-secret"), nil, keyDerivationIterations); err == nil || !strings.Contains(err.Error(), "salt cannot be empty") {
 		t.Fatalf("expected empty salt error from deriveKey, got %v", err)
 	}
+	for _, iter := range []int{0, legacyKeyDerivationIterations - 1, maxKeyDerivationIterations + 1} {
+		if _, err := deriveKey([]byte("valid-master-secret"), saltA, iter); err == nil {
+			t.Fatalf("deriveKey accepted %d iterations", iter)
+		}
+	}
 
 	k1, err := deriveKey([]byte("password-alpha"), saltA, keyDerivationIterations)
 	if err != nil || len(k1) != encryptionKeyLen {
@@ -208,6 +346,45 @@ func TestDeriveKeyValidationBoundaries(t *testing.T) {
 	kDiffPwd, _ := deriveKey([]byte("password-bravo"), saltA, keyDerivationIterations)
 	if !bytes.Equal(k1, k1Repeat) || bytes.Equal(k1, kDiffSalt) || bytes.Equal(k1, kDiffPwd) {
 		t.Fatalf("expected deterministic key derivation sensitive to both password and salt")
+	}
+}
+
+// Rotation rewrites a legacy raw salt or a weaker recorded header at the
+// current count before the store is saved under the matching key.
+func TestRotateMasterKeyUpgradesSaltHeaderBeforeSave(t *testing.T) {
+	salt := bytes.Repeat([]byte{0x73}, keyDerivationSaltLen)
+	cases := map[string][]byte{
+		"legacy raw salt":  salt,
+		"weaker iteration": append(binary.BigEndian.AppendUint32([]byte(keySaltMagic), 200_000), salt...),
+	}
+	for name, seeded := range cases {
+		t.Run(name, func(t *testing.T) {
+			home := withTempHome(t)
+			if err := os.WriteFile(filepath.Join(home, keyDerivationSaltFile), seeded, 0o600); err != nil {
+				t.Fatalf("seed salt: %v", err)
+			}
+			originalSave := saveStore
+			t.Cleanup(func() { saveStore = originalSave })
+			calls := 0
+			saveStore = func(content model.PwdFile, upstream error) error {
+				calls++
+				iterations, storedSalt := readStoredSaltParams(t, home)
+				if iterations != keyDerivationIterations || !bytes.Equal(storedSalt, salt) {
+					t.Fatalf("save began before upgraded header persisted: (%d, %x)", iterations, storedSalt)
+				}
+				return originalSave(content, upstream)
+			}
+			password := []byte("rotated-master-secret")
+			content := model.PwdFile{MasterPassword: "fixture-hash", SavedPasswords: map[string]string{"mail": "secret"}}
+			if err := rotateMasterKey(password, content); err != nil || calls != 1 {
+				t.Fatalf("rotate: err=%v, save calls = %d, want 1", err, calls)
+			}
+			utils.SetMasterKey(pbkdf2Key(password, salt, keyDerivationIterations, encryptionKeyLen, sha256.New))
+			loaded, err := utils.GetPwdObj()
+			if err != nil || loaded.MasterPassword != content.MasterPassword || loaded.SavedPasswords["mail"] != "secret" {
+				t.Fatalf("store not encrypted at upgraded count: content=%+v, err=%v", loaded, err)
+			}
+		})
 	}
 }
 
@@ -263,192 +440,135 @@ func TestExecMasterCmdInitializesHashedPasswordWithoutKeyFile(t *testing.T) {
 	}
 }
 
-func TestExecMasterCmdNormalizesUpdateConfirmation(t *testing.T) {
+// Declines (including empty input and EOF) keep the hash without aborting; a
+// non-canonical affirmative answer reaches savePassword and rotates it.
+func TestExecMasterCmdUpdateConfirmation(t *testing.T) {
 	_ = withTempHome(t)
 	stubPasswordSequence(t, "initial-secret", "initial-secret", "updated-secret")
 	execMasterCmd(masterCmd, nil)
+	initial, err := utils.GetPwdObj()
+	if err != nil {
+		t.Fatalf("initial setup: %v", err)
+	}
 
-	// Answer normalization is table-tested in TestIsAffirmative; one rotation
-	// checks that a non-canonical affirmative answer reaches savePassword.
+	exitCount := captureExit(t)
+	declines := []string{"n\n", "N\n", "no\n", "NO\n", "yeah\n", "yess\n", "\n", "  \n", "\r\n", ""}
+	for _, input := range declines {
+		feedStdinInput(t, input, func() { execMasterCmd(masterCmd, nil) })
+		if *exitCount != 0 {
+			t.Fatalf("confirmation %q aborted with %d exits, want a decline", input, *exitCount)
+		}
+		loaded, err := utils.GetPwdObj()
+		if err != nil || loaded.MasterPassword != initial.MasterPassword {
+			t.Fatalf("confirmation %q changed the master password (err=%v)", input, err)
+		}
+	}
+
 	feedStdinInput(t, "  yEs  \n", func() { execMasterCmd(masterCmd, nil) })
 	loaded, err := utils.GetPwdObj()
 	if err != nil || !utils.VerifyMasterPassword(loaded.MasterPassword, []byte("updated-secret")) {
 		t.Fatalf("expected %q confirmation to update password, err=%v", "  yEs  \n", err)
 	}
+}
 
-	feedStdinInput(t, "n\n", func() { execMasterCmd(masterCmd, nil) })
-	loaded, err = utils.GetPwdObj()
-	if err != nil || !utils.VerifyMasterPassword(loaded.MasterPassword, []byte("updated-secret")) {
-		t.Fatalf("expected 'n' confirmation to keep existing password, err=%v", err)
+func TestIsAffirmative(t *testing.T) {
+	cases := map[string]bool{
+		"Y": true, "y": true, "yes": true, "YES": true, "  YeS": true,
+		"\tY\t": true, "  yEs  ": true, "y\r": true,
+		"": false, "  ": false, "n": false, "N": false, "no": false, "NO": false,
+		"yeah": false, "yess": false, "y es": false,
+	}
+	for answer, want := range cases {
+		if got := isAffirmative(answer); got != want {
+			t.Fatalf("isAffirmative(%q) = %v, want %v", answer, got, want)
+		}
 	}
 }
 
-func TestExecMasterCmdConfirmationBoundariesAndScanError(t *testing.T) {
-	_ = withTempHome(t)
-	stubPasswordSequence(t, "initial-secret")
-	execMasterCmd(masterCmd, nil)
+type errConfirmReader struct{ err error }
 
-	initialLoaded, err := utils.GetPwdObj()
-	if err != nil {
-		t.Fatalf("expected GetPwdObj to succeed after initial setup: %v", err)
-	}
-	for _, nonAffirmative := range []string{"N\n", "no\n", "NO\n", "yeah\n", "yess\n"} {
-		feedStdinInput(t, nonAffirmative, func() { execMasterCmd(masterCmd, nil) })
-		loaded, err := utils.GetPwdObj()
-		if err != nil || loaded.MasterPassword != initialLoaded.MasterPassword {
-			t.Fatalf("expected non-affirmative input %q not to modify master password (err=%v)", nonAffirmative, err)
+func (f errConfirmReader) Read([]byte) (int, error) { return 0, f.err }
+
+func TestReadConfirmation(t *testing.T) {
+	cases := map[string]string{"y\n": "y", "\n": "", "": "", "yes": "yes", "n\nrest\n": "n"}
+	for input, want := range cases {
+		got, err := readConfirmation(strings.NewReader(input))
+		if err != nil || got != want {
+			t.Fatalf("readConfirmation(%q) = (%q, %v), want (%q, nil)", input, got, err, want)
 		}
 	}
+	readErr := errors.New("device gone")
+	if _, err := readConfirmation(errConfirmReader{readErr}); !errors.Is(err, readErr) {
+		t.Fatalf("readConfirmation read error = %v, want wrapped %v", err, readErr)
+	}
+}
 
+// A store that holds entries but has an empty master hash must not be treated
+// as initialization: the master command refuses to rotate its key.
+func TestExecMasterCmdRefusesExistingStoreWithEmptyHash(t *testing.T) {
+	tmpHome := withTempHome(t)
+	utils.SetMasterKey([]byte("original-secret"))
+	fixture := model.PwdFile{SavedPasswords: map[string]string{"bank": "hunter22"}}
+	if err := utils.SaveFileErr(fixture, nil); err != nil {
+		t.Fatalf("write fixture store: %v", err)
+	}
+	pwdPath := filepath.Join(tmpHome, utils.PwdFileName)
+	before, err := os.ReadFile(pwdPath)
+	if err != nil {
+		t.Fatalf("read fixture store: %v", err)
+	}
+	stubPasswordSequence(t, "attacker-chosen-secret")
 	exitCount := captureExit(t)
-	feedStdinInput(t, "", func() { execMasterCmd(masterCmd, nil) })
-	if *exitCount != 0 {
-		t.Fatalf("expected EOF on confirmation to be treated as a decline, got %d exits", *exitCount)
-	}
-	if afterScanErr, err := utils.GetPwdObj(); err != nil || afterScanErr.MasterPassword != initialLoaded.MasterPassword {
-		t.Fatalf("expected master password to remain unchanged when confirmation input is closed (err=%v)", err)
-	}
-}
 
-func TestGetPwdObjAfterCheckMasterPropagatesLoadError(t *testing.T) {
-	_ = withTempHome(t)
-	if _, err := utils.GetPwdObjAfterCheckMaster(); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("expected os.ErrNotExist when password file does not exist, got: %v", err)
-	}
-}
-
-func TestGetPwdObjAfterCheckMasterRejectsMismatchedMasterPassword(t *testing.T) {
-	if fi, err := os.Stdin.Stat(); err != nil || (fi.Mode()&os.ModeCharDevice) != 0 {
-		t.Skip("skipping test when stdin is a terminal device")
-	}
-	tmpHome := withTempHome(t)
-	writeTestKey(t, tmpHome, 0x11)
-
-	hashed, err := utils.HashMasterPassword([]byte("non-empty-master-secret"))
-	if err != nil {
-		t.Fatalf("failed to hash master password: %v", err)
-	}
-	if err := utils.SaveFileErr(model.PwdFile{MasterPassword: hashed}, nil); err != nil {
-		t.Fatalf("SaveFileErr: %v", err)
-	}
-
-	got, err := utils.GetPwdObjAfterCheckMaster()
-	if err == nil || got.MasterPassword != "" {
-		t.Fatalf("expected error and empty PwdFile on verification failure, got %+v, err=%v", got, err)
-	}
-
-	restoreReader := setUtilsReadPassword(func() ([]byte, error) {
-		return []byte("non-empty-master-secret"), nil
+	output := captureStdout(t, func() {
+		feedStdinInput(t, "y\n", func() { execMasterCmd(masterCmd, nil) })
 	})
-	defer restoreReader()
 
-	gotValid, err := utils.GetPwdObjAfterCheckMaster()
-	if err != nil || gotValid.MasterPassword != hashed {
-		t.Fatalf("expected loaded MasterPassword %q, got %q (err=%v)", hashed, gotValid.MasterPassword, err)
+	if *exitCount == 0 || !strings.Contains(output, errMissingMasterHash.Error()) {
+		t.Fatalf("expected missing-hash error and exit, got %d exits, output %q", *exitCount, output)
+	}
+	if strings.Contains(output, "Enter your new password:") {
+		t.Fatalf("did not expect a new password prompt, got %q", output)
+	}
+	after, err := os.ReadFile(pwdPath)
+	if err != nil || !bytes.Equal(before, after) {
+		t.Fatalf("store was rewritten despite missing master hash (err=%v)", err)
+	}
+	if _, err := os.Stat(filepath.Join(tmpHome, keyDerivationSaltFile)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("expected no salt file written, got stat err: %v", err)
 	}
 }
 
-func TestHashAndVerifyMasterPassword(t *testing.T) {
-	raw := "super-secret-master-password"
-	hashed, err := utils.HashMasterPassword([]byte(raw))
-	if err != nil || hashed == raw || strings.Contains(hashed, raw) {
-		t.Fatalf("expected valid hashed password without raw secret, got %q (err=%v)", hashed, err)
+func TestRequireMasterHash(t *testing.T) {
+	withEntries := model.PwdFile{SavedPasswords: map[string]string{"a": "b"}}
+	cases := []struct {
+		name    string
+		content model.PwdFile
+		exists  bool
+		wantErr bool
+	}{
+		{"fresh init", model.PwdFile{}, false, false},
+		{"existing store empty hash", model.PwdFile{}, true, true},
+		{"entries without hash", withEntries, false, true},
+		{"hash present", model.PwdFile{MasterPassword: "pbkdf2-sha256$x"}, true, false},
 	}
-	if !utils.VerifyMasterPassword(hashed, []byte(raw)) || utils.VerifyMasterPassword(hashed, []byte("wrong-password")) {
-		t.Fatalf("unexpected VerifyMasterPassword result")
-	}
-}
-
-func TestVerifyMasterPasswordBoundariesAndLegacyFallback(t *testing.T) {
-	raw := []byte("correct-horse-battery-staple")
-	hash1, err1 := utils.HashMasterPassword(raw)
-	hash2, err2 := utils.HashMasterPassword(raw)
-	if err1 != nil || err2 != nil || hash1 == hash2 {
-		t.Fatalf("expected distinct salted hashes, got %q, %q (errs: %v, %v)", hash1, hash2, err1, err2)
-	}
-	if !utils.VerifyMasterPassword(hash1, raw) || !utils.VerifyMasterPassword(hash2, raw) {
-		t.Fatalf("expected both salted hashes to verify against original password")
-	}
-
-	invalidStored := []string{
-		"", "pbkdf2-sha256$", "pbkdf2-sha256$onlysalt", "pbkdf2-sha256$a$b$c",
-		"pbkdf2-sha256$not-hex$abcd", "pbkdf2-sha256$$abcd", "pbkdf2-sha256$abcd$not-hex",
-		"pbkdf2-sha256$abcd$", "legacy-plaintext",
-	}
-	for _, stored := range invalidStored {
-		if utils.VerifyMasterPassword(stored, raw) || utils.VerifyMasterPassword(stored, nil) {
-			t.Fatalf("expected VerifyMasterPassword(%q) to return false", stored)
+	for _, tc := range cases {
+		err := requireMasterHash(tc.content, tc.exists)
+		if (err != nil) != tc.wantErr || (err != nil && !errors.Is(err, errMissingMasterHash)) {
+			t.Fatalf("%s: requireMasterHash = %v, wantErr %v", tc.name, err, tc.wantErr)
 		}
 	}
-	if utils.VerifyMasterPassword("legacy-plaintext", []byte("legacy-plaintext")) {
-		t.Fatalf("expected unprefixed plaintext verification to be rejected")
-	}
 }
 
-func TestSaveFileReturnsErrorWhenKeyMissing(t *testing.T) {
-	tmpHome := withTempHome(t)
-	if err := utils.SaveFileErr(model.PwdFile{MasterPassword: "hash"}, nil); err == nil {
-		t.Fatalf("expected SaveFileErr to return error when key file is missing")
-	}
-	if _, statErr := os.Stat(filepath.Join(tmpHome, utils.PwdFileName)); !errors.Is(statErr, os.ErrNotExist) {
-		t.Fatalf("expected encrypted file not to be created when encryption fails, stat err: %v", statErr)
-	}
-}
-
-func TestSaveFileRejectsUpstreamAndCipherErrors(t *testing.T) {
-	tmpHome := withTempHome(t)
-
-	inErr := errors.New("upstream failure")
-	if err := utils.SaveFileErr(model.PwdFile{MasterPassword: "hash"}, inErr); !errors.Is(err, inErr) {
-		t.Fatalf("expected SaveFileErr to return input error %v, got %v", inErr, err)
-	}
-
-	keyPath := filepath.Join(tmpHome, utils.PwdFileKey)
-	pwdPath := filepath.Join(tmpHome, utils.PwdFileName)
-	if err := os.WriteFile(keyPath, []byte("short"), 0700); err != nil {
-		t.Fatalf("failed to write short key: %v", err)
-	}
-	if err := utils.SaveFileErr(model.PwdFile{MasterPassword: "hash"}, nil); err == nil {
-		t.Fatalf("expected SaveFileErr to fail with invalid AES key size")
-	}
-	if _, statErr := os.Stat(pwdPath); !errors.Is(statErr, os.ErrNotExist) {
-		t.Fatalf("expected password file not to exist after cipher init failure, got: %v", statErr)
-	}
-}
-
-func TestSaveFileAndGetPwdObjStorageAndRoundTrip(t *testing.T) {
-	tmpHome := withTempHome(t)
-	writeTestKey(t, tmpHome, 0x33)
-	pwdPath := filepath.Join(tmpHome, utils.PwdFileName)
-
-	if err := os.WriteFile(pwdPath, []byte("tiny"), 0700); err != nil {
-		t.Fatalf("failed to write truncated ciphertext: %v", err)
-	}
-	if _, err := utils.GetPwdObj(); err == nil {
-		t.Fatalf("expected GetPwdObj to return error on truncated ciphertext shorter than nonce")
-	}
-	_ = os.Remove(pwdPath)
-
-	if err := os.Mkdir(pwdPath, 0700); err != nil {
-		t.Fatalf("failed to create directory at password file path: %v", err)
-	}
-	if err := utils.SaveFileErr(model.PwdFile{MasterPassword: "hash"}, nil); err == nil {
-		t.Fatalf("expected SaveFileErr to return error when writing encrypted file fails")
-	}
-	if err := os.Remove(pwdPath); err != nil {
-		t.Fatalf("failed to remove directory at password file path: %v", err)
-	}
-
-	expectedHash, err := utils.HashMasterPassword([]byte("round-trip-secret"))
-	if err != nil {
-		t.Fatalf("failed to hash password: %v", err)
-	}
-	if err := utils.SaveFileErr(model.PwdFile{MasterPassword: expectedHash}, nil); err != nil {
-		t.Fatalf("SaveFileErr: %v", err)
-	}
-	loaded, err := utils.GetPwdObj()
-	if err != nil || loaded.MasterPassword != expectedHash {
-		t.Fatalf("loaded MasterPassword mismatch: got %q, want %q (err=%v)", loaded.MasterPassword, expectedHash, err)
+func TestSavePasswordRefusesEntriesWithoutHash(t *testing.T) {
+	_ = withTempHome(t)
+	stubPasswordSequence(t, "attacker-chosen-secret")
+	exitCount := captureExit(t)
+	output := captureStdout(t, func() {
+		savePassword(model.PwdFile{SavedPasswords: map[string]string{"bank": "hunter22"}})
+	})
+	if *exitCount == 0 || strings.Contains(output, "Password saved") {
+		t.Fatalf("expected refusal for entries without a master hash, got %d exits, output %q", *exitCount, output)
 	}
 }
 
@@ -606,20 +726,5 @@ func TestSavePasswordAbortsWhenEncryptionFails(t *testing.T) {
 	}
 	if info, err := os.Stat(pwdPath); err != nil || !info.IsDir() {
 		t.Fatalf("expected directory at password file path to remain untouched on save failure, got: %v", err)
-	}
-}
-
-func TestManageErrorAndExitTerminatesOnError(t *testing.T) {
-	exitCode := 0
-	restore := setUtilsExit(func(code int) { exitCode = code })
-	defer restore()
-
-	utils.ManageErrorAndExit(nil)
-	if exitCode != 0 {
-		t.Fatalf("expected no exit on nil error, got exit code %d", exitCode)
-	}
-	utils.ManageErrorAndExit(errors.New("fatal failure"))
-	if exitCode == 0 {
-		t.Fatalf("expected non-zero exit code on error, got %d", exitCode)
 	}
 }
