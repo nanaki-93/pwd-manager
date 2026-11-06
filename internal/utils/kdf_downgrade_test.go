@@ -48,19 +48,52 @@ func writeV3StoreAtIterations(t *testing.T, secret []byte, content model.PwdFile
 	}
 }
 
-func TestHashNeedsUpgrade_OnlyWeakerHashes(t *testing.T) {
-	pwd := []byte("work-factor-secret")
-	cases := []struct {
-		stored string
-		want   bool
-	}{
-		{legacyHash(t, pwd), true},
-		{hashAtIterations(pwd, testLegacyPBKDF2Iter), true},
-		{hashAtIterations(pwd, pbkdf2Iter), false},
-		{hashAtIterations(pwd, testHigherPBKDF2Iter), false},
+// fakeDigestHex is a well-formed derivedKeySize digest for hashes that are only
+// parsed, never verified, so building them costs no PBKDF2 derivation.
+var fakeDigestHex = hex.EncodeToString(bytes.Repeat([]byte{0x5a}, derivedKeySize))
+
+var fakeSaltHex = hex.EncodeToString(bytes.Repeat([]byte{0x17}, saltSize))
+
+// fakeHashAtIterations formats a parseable master hash recording iter without calling kdf.
+func fakeHashAtIterations(iter int) string {
+	return fmt.Sprintf("%s%d$%s$%s", hashPrefix, iter, fakeSaltHex, fakeDigestHex)
+}
+
+// fakeLegacyHash formats a parseable legacy master hash (no iteration field) without calling kdf.
+func fakeLegacyHash() string {
+	return fmt.Sprintf("%s%s$%s", hashPrefix, fakeSaltHex, fakeDigestHex)
+}
+
+type hashUpgradeCase struct {
+	stored string
+	want   bool
+}
+
+func hashNeedsUpgradeCases() []hashUpgradeCase {
+	return []hashUpgradeCase{
+		{fakeLegacyHash(), true},
+		{fakeHashAtIterations(testLegacyPBKDF2Iter), true},
+		{fakeHashAtIterations(pbkdf2Iter), false},
+		{fakeHashAtIterations(testHigherPBKDF2Iter), false},
 		{"not-a-hash", false},
 	}
-	for _, c := range cases {
+}
+
+func TestHashNeedsUpgradeCasesDeriveNoKeys(t *testing.T) {
+	calls := 0
+	restore := SetKDFForTesting(func(_, _ []byte, _, n int) []byte {
+		calls++
+		return make([]byte, n)
+	})
+	defer restore()
+	hashNeedsUpgradeCases()
+	if calls != 0 {
+		t.Fatalf("building parse-only hashes ran kdf %d times, want 0", calls)
+	}
+}
+
+func TestHashNeedsUpgrade_OnlyWeakerHashes(t *testing.T) {
+	for _, c := range hashNeedsUpgradeCases() {
 		if got := hashNeedsUpgrade(c.stored); got != c.want {
 			t.Errorf("hashNeedsUpgrade(%q) = %v, want %v", c.stored, got, c.want)
 		}
