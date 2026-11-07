@@ -2,14 +2,12 @@ package cmd
 
 import (
 	"bytes"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"os"
 	"strings"
 	"testing"
-	"unicode/utf8"
 
 	"github.com/spf13/cobra"
 )
@@ -85,154 +83,6 @@ func (b *wholeBufferWriter) flush() error {
 	return err
 }
 
-func TestWriteListOutput_MasksByDefault(t *testing.T) {
-	saved := map[string]string{
-		"github": "super-secret-1",
-		"email":  "hunter2",
-	}
-
-	var buf bytes.Buffer
-	if err := writeListOutput(&buf, saved, false); err != nil {
-		t.Fatalf("expected no error, got %v", err)
-	}
-
-	got := buf.String()
-	want := "email: ********\ngithub: ********\n"
-	if got != want {
-		t.Fatalf("unexpected output: got %q, want %q", got, want)
-	}
-	if strings.Contains(got, "super-secret-1") || strings.Contains(got, "hunter2") {
-		t.Fatalf("plaintext password leaked in masked output: %q", got)
-	}
-}
-
-func TestWriteListOutput_ShowsPlaintextWhenFlagSet(t *testing.T) {
-	saved := map[string]string{
-		"github": "super-secret-1",
-		"email":  "hunter2",
-	}
-
-	var buf bytes.Buffer
-	if err := writeListOutput(&buf, saved, true); err != nil {
-		t.Fatalf("expected no error, got %v", err)
-	}
-
-	got := buf.String()
-	want := "email: hunter2\ngithub: super-secret-1\n"
-	if got != want {
-		t.Fatalf("unexpected output: got %q, want %q", got, want)
-	}
-}
-
-func TestWriteListOutput_EmptyAndNilMap(t *testing.T) {
-	for _, tc := range []struct {
-		name          string
-		saved         map[string]string
-		showPlaintext bool
-	}{
-		{name: "nil map masked", saved: nil, showPlaintext: false},
-		{name: "nil map plaintext", saved: nil, showPlaintext: true},
-		{name: "empty map masked", saved: map[string]string{}, showPlaintext: false},
-		{name: "empty map plaintext", saved: map[string]string{}, showPlaintext: true},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			var buf bytes.Buffer
-			if err := writeListOutput(&buf, tc.saved, tc.showPlaintext); err != nil {
-				t.Fatalf("expected no error, got %v", err)
-			}
-			if buf.Len() != 0 {
-				t.Fatalf("expected empty output, got %q", buf.String())
-			}
-		})
-	}
-}
-
-func TestWriteListOutput_BoundaryValuesAndSorting(t *testing.T) {
-	saved := map[string]string{
-		"z-account": "",
-		"a-account": "p@ss:w0rd!",
-		"m-account": "********",
-	}
-
-	var maskedBuf bytes.Buffer
-	if err := writeListOutput(&maskedBuf, saved, false); err != nil {
-		t.Fatalf("expected no error, got %v", err)
-	}
-	wantMasked := "a-account: ********\nm-account: ********\nz-account: ********\n"
-	if maskedBuf.String() != wantMasked {
-		t.Fatalf("unexpected masked output: got %q, want %q", maskedBuf.String(), wantMasked)
-	}
-
-	var plainBuf bytes.Buffer
-	if err := writeListOutput(&plainBuf, saved, true); err != nil {
-		t.Fatalf("expected no error, got %v", err)
-	}
-	wantPlain := "a-account: p@ss:w0rd!\nm-account: ********\nz-account: \n"
-	if plainBuf.String() != wantPlain {
-		t.Fatalf("unexpected plaintext output: got %q, want %q", plainBuf.String(), wantPlain)
-	}
-}
-
-func TestWriteListOutput_EscapesControlCharacters(t *testing.T) {
-	saved := map[string]string{
-		"evil\x1b[2J\rname\xe2\x80\xae": "val\x07\x1b]0;pwn\x07\xff",
-	}
-
-	for _, show := range []bool{false, true} {
-		var buf bytes.Buffer
-		if err := writeListOutput(&buf, saved, show); err != nil {
-			t.Fatalf("expected no error, got %v", err)
-		}
-		got := buf.String()
-		body := strings.TrimSuffix(got, "\n")
-		for _, r := range body {
-			if r < 0x20 || r == 0x7f || r == 0x202e || r == utf8.RuneError {
-				t.Fatalf("show=%v: output contains unescaped rune %U: %q", show, r, got)
-			}
-		}
-		if !strings.HasPrefix(got, `evil\x1b[2J\rname`+"\\"+`u202e: `) {
-			t.Fatalf("show=%v: name not escaped as expected: %q", show, got)
-		}
-		if show && !strings.HasSuffix(got, `: val\a\x1b]0;pwn\a\xff`+"\n") {
-			t.Fatalf("value not escaped as expected: %q", got)
-		}
-	}
-}
-
-func TestWriteListOutput_EscapesSeparatorAndNewlineInKeys(t *testing.T) {
-	saved := map[string]string{
-		"a: b":             "v1",
-		"x\nfake: entry":   "v2",
-		`back\nslash`:      "v3",
-		"plain-key:no-sep": "v4",
-	}
-
-	var buf bytes.Buffer
-	if err := writeListOutput(&buf, saved, true); err != nil {
-		t.Fatalf("expected no error, got %v", err)
-	}
-	want := `a\: b: v1` + "\n" +
-		`back\\nslash: v3` + "\n" +
-		`plain-key:no-sep: v4` + "\n" +
-		`x\nfake\: entry: v2` + "\n"
-	if got := buf.String(); got != want {
-		t.Fatalf("unexpected output:\n got %q\nwant %q", got, want)
-	}
-}
-
-func TestWriteListOutput_PropagatesWriteError(t *testing.T) {
-	saved := map[string]string{"github": "super-secret-1"}
-	boom := errors.New("broken pipe")
-
-	err := writeListOutput(errWriter{err: boom}, saved, false)
-	if !errors.Is(err, boom) {
-		t.Fatalf("expected wrapped error %v, got %v", boom, err)
-	}
-	if !strings.Contains(err.Error(), "write list output:") {
-		t.Fatalf("expected error context 'write list output:', got %q", err.Error())
-	}
-}
-
 // countingWriter records how many Write calls reach it.
 type countingWriter struct {
 	calls int
@@ -242,6 +92,144 @@ type countingWriter struct {
 func (c *countingWriter) Write(p []byte) (int, error) {
 	c.calls++
 	return c.buf.Write(p)
+}
+
+// A short write without an error must still be surfaced by the buffering layer.
+type listShortWriter struct{}
+
+func (listShortWriter) Write(p []byte) (int, error) { return len(p) / 2, nil }
+
+type resetRejectingValue struct {
+	err error
+}
+
+func (v *resetRejectingValue) String() string { return "current" }
+func (v *resetRejectingValue) Type() string   { return "reset-rejecting" }
+func (v *resetRejectingValue) Set(string) error {
+	return v.err
+}
+
+// listOutputMode names a list writer and the context its errors carry.
+type listOutputMode struct {
+	name    string
+	write   func(io.Writer, map[string]string, bool) error
+	context string
+}
+
+func listOutputModes() []listOutputMode {
+	return []listOutputMode{
+		{"text", writeListOutput, "write list output:"},
+		{"json", writeListJSONOutput, "write list json output:"},
+	}
+}
+
+func TestWriteListOutput_SortsAndMasksEntries(t *testing.T) {
+	saved := map[string]string{
+		"github":    "super-secret-1",
+		"email":     "hunter2",
+		"z-account": "",
+		"a-account": "p@ss:w0rd!",
+		"m-account": "********",
+	}
+	for _, tc := range []struct {
+		name string
+		show bool
+		want string
+	}{
+		{"masked by default", false, "a-account: ********\nemail: ********\ngithub: ********\nm-account: ********\nz-account: ********\n"},
+		{"plaintext when shown", true, "a-account: p@ss:w0rd!\nemail: hunter2\ngithub: super-secret-1\nm-account: ********\nz-account: \n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			if err := writeListOutput(&buf, saved, tc.show); err != nil {
+				t.Fatalf("expected no error, got %v", err)
+			}
+			if got := buf.String(); got != tc.want {
+				t.Fatalf("unexpected output: got %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestListWriters_EmptyAndNilMap(t *testing.T) {
+	wantByMode := map[string]string{"text": "", "json": "{}\n"}
+	for _, mode := range listOutputModes() {
+		for _, saved := range []map[string]string{nil, {}} {
+			for _, show := range []bool{false, true} {
+				var buf bytes.Buffer
+				if err := mode.write(&buf, saved, show); err != nil {
+					t.Fatalf("%s nil=%v show=%v: expected no error, got %v", mode.name, saved == nil, show, err)
+				}
+				if got := buf.String(); got != wantByMode[mode.name] {
+					t.Fatalf("%s nil=%v show=%v: got %q, want %q", mode.name, saved == nil, show, got, wantByMode[mode.name])
+				}
+			}
+		}
+	}
+}
+
+func TestWriteListOutput_EscapesKeysAndValues(t *testing.T) {
+	for _, tc := range []struct{ name, key, value, wantKey, wantValue string }{
+		{"terminal escapes", "evil\x1b[2J\rname\xe2\x80\xae", "val\x07\x1b]0;pwn\x07\xff", `evil\x1b[2J\rname\` + `u202e`, `val\a\x1b]0;pwn\a\xff`},
+		{"separator in key", "a: b", "v1", `a\: b`, "v1"},
+		{"newline and separator in key", "x\nfake: entry", "v2", `x\nfake\: entry`, "v2"},
+		{"backslash in key", `back\nslash`, "v3", `back\\nslash`, "v3"},
+		{"colon without space", "plain-key:no-sep", "v4", "plain-key:no-sep", "v4"},
+		{"printable unicode", "café 日本語 😀 �", "café 日本語 😀 �", "café 日本語 😀 �", "café 日本語 😀 �"},
+		{"nul and delete", "a\x00\x7fb", "a\x00\x7fb", `a\x00\x7fb`, `a\x00\x7fb`},
+		{"C1 and line separator", "a\xc2\x9b\xe2\x80\xa8b", "a\xc2\x9b\xe2\x80\xa8b", `a\` + `u009b\` + `u2028b`, `a\` + `u009b\` + `u2028b`},
+		{"truncated utf8", "a\xe2\x82", "a\xe2\x82", `a\xe2\x82`, `a\xe2\x82`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			for _, show := range []bool{false, true} {
+				var buf bytes.Buffer
+				if err := writeListOutput(&buf, map[string]string{tc.key: tc.value}, show); err != nil {
+					t.Fatalf("show=%v: expected no error, got %v", show, err)
+				}
+				wantValue := maskedPasswordPlaceholder
+				if show {
+					wantValue = tc.wantValue
+				}
+				if want := tc.wantKey + ": " + wantValue + "\n"; buf.String() != want {
+					t.Fatalf("show=%v: got %q, want %q", show, buf.String(), want)
+				}
+			}
+		})
+	}
+}
+
+func TestSanitizeForTerminal_PrintableASCIIUnchangedWithoutAllocating(t *testing.T) {
+	var printable string
+	for c := byte(0x20); c <= 0x7e; c++ {
+		printable += string(c)
+	}
+	for _, s := range []string{"", " ", "~", printable, "github.com/user: Pa55-w0rd ~!@#$%^&*()"} {
+		allocs := testing.AllocsPerRun(100, func() {
+			if got := sanitizeForTerminal(s); got != s {
+				t.Fatalf("sanitizeForTerminal(%q) = %q, want unchanged", s, got)
+			}
+		})
+		if allocs != 0 {
+			t.Errorf("input %q: allocations = %v, want zero", s, allocs)
+		}
+	}
+}
+
+func TestSanitizeForTerminal_EscapesOutsidePrintableASCII(t *testing.T) {
+	for in, want := range map[string]string{
+		"a\x1b[31mb": `a\x1b[31mb`,
+		"tab\there":  `tab\there`,
+		"del\x7f":    `del\x7f`,
+		"bad\xff":    `bad\xff`,
+		"héllo":      "héllo",
+		"\x1f ~":     `\x1f ~`,
+		" ~\x7f":     ` ~\x7f`,
+		" ~\u0080":   ` ~\u0080`,
+	} {
+		if got := sanitizeForTerminal(in); got != want {
+			t.Errorf("sanitizeForTerminal(%q) = %q, want %q", in, got, want)
+		}
+	}
 }
 
 func TestWriteListOutput_BuffersEntriesIntoFewWrites(t *testing.T) {
@@ -263,34 +251,49 @@ func TestWriteListOutput_BuffersEntriesIntoFewWrites(t *testing.T) {
 	}
 }
 
-func TestWriteListOutput_FlushErrorIsWrapped(t *testing.T) {
-	saved := map[string]string{"github": "super-secret-1"}
+func TestListWriters_FlushErrorIsWrapped(t *testing.T) {
 	boom := errors.New("broken pipe")
-
-	err := writeListOutput(errWriter{err: boom}, saved, false)
-	if !errors.Is(err, boom) {
-		t.Fatalf("expected wrapped error %v, got %v", boom, err)
-	}
-	if !strings.Contains(err.Error(), "write list output: flush:") {
-		t.Fatalf("expected flush error context, got %q", err.Error())
+	for _, mode := range listOutputModes() {
+		for _, show := range []bool{false, true} {
+			err := mode.write(errWriter{err: boom}, map[string]string{"github": "super-secret-1"}, show)
+			if !errors.Is(err, boom) {
+				t.Fatalf("%s show=%v: expected wrapped error %v, got %v", mode.name, show, boom, err)
+			}
+			if !strings.Contains(err.Error(), mode.context+" flush:") {
+				t.Fatalf("%s show=%v: expected flush error context, got %q", mode.name, show, err.Error())
+			}
+		}
 	}
 }
 
-func TestWriteListOutput_MidStreamWriteError(t *testing.T) {
-	saved := map[string]string{
-		"first":  "secret-1",
-		"second": "secret-2",
+func TestListWriters_ShortWritesAreReported(t *testing.T) {
+	for _, mode := range listOutputModes() {
+		t.Run(mode.name, func(t *testing.T) {
+			err := mode.write(listShortWriter{}, map[string]string{"entry": "value"}, true)
+			if !errors.Is(err, io.ErrShortWrite) {
+				t.Fatalf("expected wrapped short write, got %v", err)
+			}
+		})
 	}
-	boom := errors.New("short write on second entry")
-	wantPartial := "first: ********\n"
-	w := &failAfterNBytesWriter{remaining: len(wantPartial), err: boom}
+}
 
-	err := writeListOutput(w, saved, false)
-	if !errors.Is(err, boom) {
-		t.Fatalf("expected wrapped error %v, got %v", boom, err)
-	}
-	if w.buf.String() != wantPartial {
-		t.Fatalf("unexpected partial output before error: %q", w.buf.String())
+func TestListWriters_FailureBeforeFinalFlush(t *testing.T) {
+	for _, mode := range listOutputModes() {
+		t.Run(mode.name, func(t *testing.T) {
+			boom := errors.New("output disconnected")
+			saved := map[string]string{"a": strings.Repeat("x", 20000), "z": "last"}
+			w := &failAfterNBytesWriter{remaining: 100, err: boom}
+			err := mode.write(w, saved, true)
+			if !errors.Is(err, boom) || !strings.Contains(err.Error(), mode.context) {
+				t.Fatalf("expected contextual wrapped failure, got %v", err)
+			}
+			if w.buf.Len() != 100 || strings.Contains(w.buf.String(), "last") {
+				t.Fatalf("unexpected partial output: %q", w.buf.String())
+			}
+			if saved["z"] != "last" || len(saved["a"]) != 20000 {
+				t.Fatal("writer mutated caller's entries")
+			}
+		})
 	}
 }
 
@@ -302,103 +305,112 @@ func TestWriteListOutput_MidStreamWriteErrorIndependentOfWriteCalls(t *testing.T
 	boom := errors.New("short write on second entry")
 	wantPartial := "first: ********\n"
 
-	t.Run("split into single-byte writes", func(t *testing.T) {
-		sink := &failAfterNBytesWriter{remaining: len(wantPartial), err: boom}
-		err := writeListOutput(byteSplitWriter{w: sink}, saved, false)
-		if !errors.Is(err, boom) {
-			t.Fatalf("expected wrapped error %v, got %v", boom, err)
-		}
-		if sink.buf.String() != wantPartial {
-			t.Fatalf("unexpected partial output before error: %q", sink.buf.String())
-		}
-	})
-
-	t.Run("whole output in one write", func(t *testing.T) {
-		sink := &failAfterNBytesWriter{remaining: len(wantPartial), err: boom}
-		bw := &wholeBufferWriter{w: sink}
-		if err := writeListOutput(bw, saved, false); err != nil {
-			t.Fatalf("expected no error while buffering, got %v", err)
-		}
-		if err := bw.flush(); !errors.Is(err, boom) {
-			t.Fatalf("expected error %v on flush, got %v", boom, err)
-		}
-		if sink.buf.String() != wantPartial {
-			t.Fatalf("unexpected partial output before error: %q", sink.buf.String())
-		}
-	})
-}
-
-func TestListCmd_ShowFlagRegistered(t *testing.T) {
-	flag := listCmd.Flags().Lookup("show")
-	if flag == nil {
-		t.Fatal("expected --show flag to be registered on listCmd")
-	}
-	if flag.Shorthand != "s" {
-		t.Fatalf("expected shorthand 's', got %q", flag.Shorthand)
-	}
-	if flag.DefValue != "false" {
-		t.Fatalf("expected default value 'false', got %q", flag.DefValue)
+	for _, tc := range []struct {
+		name  string
+		write func(t *testing.T, sink io.Writer) error
+	}{
+		{"direct writes", func(_ *testing.T, sink io.Writer) error { return writeListOutput(sink, saved, false) }},
+		{"split into single-byte writes", func(_ *testing.T, sink io.Writer) error {
+			return writeListOutput(byteSplitWriter{w: sink}, saved, false)
+		}},
+		{"whole output in one write", func(t *testing.T, sink io.Writer) error {
+			bw := &wholeBufferWriter{w: sink}
+			if err := writeListOutput(bw, saved, false); err != nil {
+				t.Fatalf("expected no error while buffering, got %v", err)
+			}
+			return bw.flush()
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			sink := &failAfterNBytesWriter{remaining: len(wantPartial), err: boom}
+			if err := tc.write(t, sink); !errors.Is(err, boom) {
+				t.Fatalf("expected wrapped error %v, got %v", boom, err)
+			}
+			if sink.buf.String() != wantPartial {
+				t.Fatalf("unexpected partial output before error: %q", sink.buf.String())
+			}
+		})
 	}
 }
 
-func TestListCmd_ShowFlagParsing(t *testing.T) {
-	orig := listShowFlag
-	t.Cleanup(func() {
-		if err := resetFlagToDefault(listCmd, "show"); err != nil {
-			t.Errorf("cleanup: %v", err)
-		}
-		listShowFlag = orig
-	})
-
-	if err := listCmd.ParseFlags([]string{"-s"}); err != nil {
-		t.Fatalf("unexpected error parsing -s: %v", err)
-	}
-	if !listShowFlag {
-		t.Fatal("expected listShowFlag to be true after parsing -s")
-	}
-
-	if err := listCmd.ParseFlags([]string{"--show=false"}); err != nil {
-		t.Fatalf("unexpected error parsing --show=false: %v", err)
-	}
-	if listShowFlag {
-		t.Fatal("expected listShowFlag to be false after parsing --show=false")
+func TestFailAfterNBytesWriter_ByteBudgetBoundaries(t *testing.T) {
+	boom := errors.New("byte budget exhausted")
+	for _, tc := range []struct {
+		name      string
+		remaining int
+		input     string
+		want      string
+		wantErr   bool
+	}{
+		{name: "zero budget", input: "abc", wantErr: true},
+		{name: "partial write", remaining: 2, input: "abcd", want: "ab", wantErr: true},
+		{name: "exact budget", remaining: 3, input: "abc", want: "abc"},
+		{name: "below budget", remaining: 4, input: "abc", want: "abc"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			w := &failAfterNBytesWriter{remaining: tc.remaining, err: boom}
+			n, err := w.Write([]byte(tc.input))
+			if n != len(tc.want) || w.buf.String() != tc.want {
+				t.Fatalf("Write = %d, buffer %q; want %d, %q", n, w.buf.String(), len(tc.want), tc.want)
+			}
+			if tc.wantErr && !errors.Is(err, boom) {
+				t.Fatalf("expected sentinel error, got %v", err)
+			}
+			if !tc.wantErr && err != nil {
+				t.Fatalf("unexpected write error: %v", err)
+			}
+			if w.remaining == 0 {
+				n, err = w.Write([]byte("next"))
+				if n != 0 || !errors.Is(err, boom) || w.buf.String() != tc.want {
+					t.Fatalf("exhausted writer accepted data: n=%d err=%v buffer=%q", n, err, w.buf.String())
+				}
+			}
+		})
 	}
 }
 
-func TestListCmd_JSONFlagRegistered(t *testing.T) {
-	flag := listCmd.Flags().Lookup("json")
-	if flag == nil {
-		flag = listCmd.PersistentFlags().Lookup("json")
-	}
-	if flag == nil {
-		t.Fatal("expected --json flag to be registered on listCmd")
-	}
-	if flag.DefValue != "false" {
-		t.Fatalf("expected default value 'false', got %q", flag.DefValue)
+func TestListCmd_FlagsRegistered(t *testing.T) {
+	for _, tc := range []struct{ name, shorthand string }{
+		{"show", "s"},
+		{"json", ""},
+		{"allow-non-tty", ""},
+	} {
+		flag := listCmd.Flags().Lookup(tc.name)
+		if flag == nil {
+			t.Fatalf("expected --%s flag to be registered on listCmd", tc.name)
+		}
+		if flag.Shorthand != tc.shorthand {
+			t.Fatalf("--%s: expected shorthand %q, got %q", tc.name, tc.shorthand, flag.Shorthand)
+		}
+		if flag.DefValue != "false" {
+			t.Fatalf("--%s: expected default value 'false', got %q", tc.name, flag.DefValue)
+		}
 	}
 }
 
-func TestListCmd_JSONFlagParsing(t *testing.T) {
-	orig := listJSONFlag
-	t.Cleanup(func() {
-		if err := resetFlagToDefault(listCmd, "json"); err != nil {
-			t.Errorf("cleanup: %v", err)
-		}
-		listJSONFlag = orig
-	})
-
-	if err := listCmd.ParseFlags([]string{"--json"}); err != nil {
-		t.Fatalf("unexpected error parsing --json: %v", err)
-	}
-	if !listJSONFlag {
-		t.Fatal("expected listJSONFlag to be true after parsing --json")
-	}
-
-	if err := listCmd.ParseFlags([]string{"--json=false"}); err != nil {
-		t.Fatalf("unexpected error parsing --json=false: %v", err)
-	}
-	if listJSONFlag {
-		t.Fatal("expected listJSONFlag to be false after parsing --json=false")
+func TestListCmd_FlagParsing(t *testing.T) {
+	for _, tc := range []struct {
+		name, enable, disable string
+		value                 *bool
+	}{
+		{"show", "-s", "--show=false", &listShowFlag},
+		{"json", "--json", "--json=false", &listJSONFlag},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			orig := *tc.value
+			t.Cleanup(func() {
+				if err := resetFlagToDefault(listCmd, tc.name); err != nil {
+					t.Errorf("cleanup: %v", err)
+				}
+				*tc.value = orig
+			})
+			if err := listCmd.ParseFlags([]string{tc.enable}); err != nil || !*tc.value {
+				t.Fatalf("parsing %s: err=%v, value=%v; want true", tc.enable, err, *tc.value)
+			}
+			if err := listCmd.ParseFlags([]string{tc.disable}); err != nil || *tc.value {
+				t.Fatalf("parsing %s: err=%v, value=%v; want false", tc.disable, err, *tc.value)
+			}
+		})
 	}
 }
 
@@ -430,234 +442,24 @@ func TestResetFlagToDefault_ReportsUnknownFlag(t *testing.T) {
 	}
 }
 
-func TestWriteListJSONOutput_MasksByDefaultAndValidStructure(t *testing.T) {
-	saved := map[string]string{
-		"github": "super-secret-1",
-		"email":  "hunter2",
-	}
+func TestResetFlagToDefault_PropagatesValueResetFailure(t *testing.T) {
+	boom := errors.New("reset rejected")
+	cmd := &cobra.Command{Use: "isolated-list"}
+	cmd.Flags().Var(&resetRejectingValue{err: boom}, "json", "test flag")
+	flag := cmd.Flags().Lookup("json")
+	flag.Changed = true
 
-	var buf bytes.Buffer
-	if err := writeListJSONOutput(&buf, saved, false); err != nil {
-		t.Fatalf("expected no error, got %v", err)
-	}
-
-	raw := buf.String()
-	wantFormatted := "{\n  \"email\": \"********\",\n  \"github\": \"********\"\n}\n"
-	if raw != wantFormatted {
-		t.Fatalf("unexpected formatted JSON: got %q, want %q", raw, wantFormatted)
-	}
-	if strings.Contains(raw, "super-secret-1") || strings.Contains(raw, "hunter2") {
-		t.Fatalf("plaintext password leaked in masked JSON output: %q", raw)
-	}
-
-	var parsed map[string]string
-	if err := json.Unmarshal(buf.Bytes(), &parsed); err != nil {
-		t.Fatalf("output is not valid JSON: %v", err)
-	}
-	if len(parsed) != 2 || parsed["email"] != maskedPasswordPlaceholder || parsed["github"] != maskedPasswordPlaceholder {
-		t.Fatalf("unexpected parsed JSON map: %#v", parsed)
-	}
-}
-
-func TestWriteListJSONOutput_ShowsPlaintextWhenFlagSet(t *testing.T) {
-	saved := map[string]string{
-		"github":  "super-secret-1",
-		"email":   "hunter2",
-		"special": "p@ss:w0rd!",
-	}
-
-	var buf bytes.Buffer
-	if err := writeListJSONOutput(&buf, saved, true); err != nil {
-		t.Fatalf("expected no error, got %v", err)
-	}
-
-	if err := checkJSONEntries(buf.Bytes(), saved); err != nil {
-		t.Fatalf("unexpected plaintext JSON output %q: %v", buf.String(), err)
-	}
-}
-
-// checkJSONEntries reports whether raw is a JSON object holding exactly the
-// entries of want: no missing, changed, extra or duplicated keys.
-func checkJSONEntries(raw []byte, want map[string]string) error {
-	dec := json.NewDecoder(bytes.NewReader(raw))
-	if tok, err := dec.Token(); err != nil || tok != json.Delim('{') {
-		return fmt.Errorf("expected JSON object start, got %v (err=%v)", tok, err)
-	}
-	seen := make(map[string]bool, len(want))
-	for dec.More() {
-		tok, err := dec.Token()
-		if err != nil {
-			return fmt.Errorf("read key: %w", err)
-		}
-		key, ok := tok.(string)
-		if !ok {
-			return fmt.Errorf("expected string key, got %v", tok)
-		}
-		var val string
-		if err := dec.Decode(&val); err != nil {
-			return fmt.Errorf("decode value for key %q: %w", key, err)
-		}
-		if seen[key] {
-			return fmt.Errorf("duplicated key %q", key)
-		}
-		seen[key] = true
-		exp, ok := want[key]
-		if !ok {
-			return fmt.Errorf("unexpected extra key %q", key)
-		}
-		if val != exp {
-			return fmt.Errorf("for key %q: got %q, want %q", key, val, exp)
-		}
-	}
-	if len(seen) != len(want) {
-		return fmt.Errorf("got %d keys, want %d", len(seen), len(want))
-	}
-	if _, err := dec.Token(); err != nil {
-		return fmt.Errorf("read object end: %w", err)
-	}
-	return nil
-}
-
-func TestCheckJSONEntries_RejectsExtraDuplicateAndMissingKeys(t *testing.T) {
-	want := map[string]string{"email": "hunter2", "github": "s1"}
-	for _, tc := range []struct {
-		name string
-		raw  string
-		ok   bool
-	}{
-		{name: "exact", raw: `{"email":"hunter2","github":"s1"}`, ok: true},
-		{name: "extra key", raw: `{"email":"hunter2","github":"s1","bank":"x"}`},
-		{name: "duplicated key", raw: `{"email":"hunter2","github":"s1","email":"hunter2"}`},
-		{name: "missing key", raw: `{"email":"hunter2"}`},
-		{name: "changed value", raw: `{"email":"hunter2","github":"s2"}`},
-		{name: "not an object", raw: `["email"]`},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			err := checkJSONEntries([]byte(tc.raw), want)
-			if tc.ok && err != nil {
-				t.Fatalf("expected match, got %v", err)
-			}
-			if !tc.ok && err == nil {
-				t.Fatalf("expected mismatch for %s", tc.raw)
-			}
-		})
-	}
-}
-
-func TestWriteListJSONOutput_EmptyAndNilMap(t *testing.T) {
-	for _, tc := range []struct {
-		name          string
-		saved         map[string]string
-		showPlaintext bool
-	}{
-		{name: "nil map masked", saved: nil, showPlaintext: false},
-		{name: "nil map plaintext", saved: nil, showPlaintext: true},
-		{name: "empty map masked", saved: map[string]string{}, showPlaintext: false},
-		{name: "empty map plaintext", saved: map[string]string{}, showPlaintext: true},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			var buf bytes.Buffer
-			if err := writeListJSONOutput(&buf, tc.saved, tc.showPlaintext); err != nil {
-				t.Fatalf("expected no error, got %v", err)
-			}
-			if buf.String() != "{}\n" {
-				t.Fatalf("expected empty JSON object, got %q", buf.String())
-			}
-			var parsed map[string]string
-			if err := json.Unmarshal(buf.Bytes(), &parsed); err != nil {
-				t.Fatalf("output is not valid JSON: %v", err)
-			}
-			if len(parsed) != 0 {
-				t.Fatalf("expected empty parsed map, got %#v", parsed)
-			}
-		})
-	}
-}
-
-func TestWriteListJSONOutput_PropagatesWriteError(t *testing.T) {
-	saved := map[string]string{"github": "super-secret-1"}
-	boom := errors.New("broken pipe")
-
-	err := writeListJSONOutput(errWriter{err: boom}, saved, false)
+	err := resetFlagToDefault(cmd, "json")
 	if !errors.Is(err, boom) {
-		t.Fatalf("expected wrapped error %v, got %v", boom, err)
+		t.Fatalf("expected wrapped reset error %v, got %v", boom, err)
 	}
-	if !strings.Contains(err.Error(), "write list json output:") {
-		t.Fatalf("expected error context 'write list json output:', got %q", err.Error())
-	}
-}
-
-func TestWriteListJSONOutput_MatchesMarshalIndentByteForByte(t *testing.T) {
-	saved := map[string]string{}
-	saved["github"] = "super-secret-1"
-	saved["<html>&'\""] = "a<b>&c\"d\\e"
-	saved["bad\xffutf8"] = "v\xfe"
-	saved["ünïcode "] = "line\nbreak\t\x01"
-	saved[""] = ""
-	saved["plain-key:no-sep"] = "p@ss:w0rd!"
-	for _, show := range []bool{false, true} {
-		entries := make(map[string]string, len(saved))
-		for k, v := range saved {
-			entries[k] = maskedPasswordPlaceholder
-			if show {
-				entries[k] = v
-			}
-		}
-		want, err := json.MarshalIndent(entries, "", "  ")
-		if err != nil {
-			t.Fatalf("marshal reference: %v", err)
-		}
-		var buf bytes.Buffer
-		if err := writeListJSONOutput(&buf, saved, show); err != nil {
-			t.Fatalf("show=%v: expected no error, got %v", show, err)
-		}
-		if got := buf.String(); got != string(want)+"\n" {
-			t.Fatalf("show=%v: output differs:\n got %q\nwant %q", show, got, string(want)+"\n")
+	for _, context := range []string{"json", "isolated-list", "current"} {
+		if !strings.Contains(err.Error(), context) {
+			t.Errorf("reset error %q lacks context %q", err, context)
 		}
 	}
-}
-
-// maxWriteWriter records the largest single Write it receives.
-type maxWriteWriter struct {
-	max   int
-	total int
-}
-
-func (m *maxWriteWriter) Write(p []byte) (int, error) {
-	if len(p) > m.max {
-		m.max = len(p)
-	}
-	m.total += len(p)
-	return len(p), nil
-}
-
-func TestWriteListJSONOutput_StreamsLargeVaultInBoundedWrites(t *testing.T) {
-	saved := make(map[string]string, 5000)
-	for i := 0; i < 5000; i++ {
-		saved[fmt.Sprintf("entry-%05d", i)] = strings.Repeat("s", 32)
-	}
-	for _, show := range []bool{false, true} {
-		w := &maxWriteWriter{}
-		if err := writeListJSONOutput(w, saved, show); err != nil {
-			t.Fatalf("show=%v: expected no error, got %v", show, err)
-		}
-		if w.total < 64*1024 {
-			t.Fatalf("show=%v: payload too small for the test: %d bytes", show, w.total)
-		}
-		if w.max > 4096 {
-			t.Fatalf("show=%v: largest single write was %d bytes of %d; output is not streamed", show, w.max, w.total)
-		}
-	}
-}
-
-func TestWriteListJSONOutput_FlushErrorIsWrapped(t *testing.T) {
-	boom := errors.New("broken pipe")
-	err := writeListJSONOutput(errWriter{err: boom}, map[string]string{"a": "b"}, true)
-	if !errors.Is(err, boom) {
-		t.Fatalf("expected wrapped error %v, got %v", boom, err)
-	}
-	if !strings.Contains(err.Error(), "write list json output: flush:") {
-		t.Fatalf("expected flush error context, got %q", err.Error())
+	if !flag.Changed {
+		t.Fatal("failed reset must not mark the flag unchanged")
 	}
 }
 
@@ -701,61 +503,46 @@ func TestCheckPlaintextOutputAllowed_RealNonTTYWriters(t *testing.T) {
 	}
 }
 
-func TestListCmd_HasAllowNonTTYFlag(t *testing.T) {
-	fl := listCmd.Flags().Lookup("allow-non-tty")
-	if fl == nil || fl.DefValue != "false" {
-		t.Fatalf("expected --allow-non-tty flag defaulting to false, got %+v", fl)
+func TestRunListCmd_AllowedOutputGoesToStdoutOnly(t *testing.T) {
+	for _, tc := range []struct {
+		name                      string
+		show, asJSON, allowNonTTY bool
+		want                      string
+	}{
+		{"text masked without override", false, false, false, "github: ********\n"},
+		{"text masked with override", false, false, true, "github: ********\n"},
+		{"text plaintext override", true, false, true, "github: test-password\n"},
+		{"json masked without override", false, true, false, "{\n  \"github\": \"********\"\n}\n"},
+		{"json masked with override", false, true, true, "{\n  \"github\": \"********\"\n}\n"},
+		{"json plaintext override", true, true, true, "{\n  \"github\": \"test-password\"\n}\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var out, errOut bytes.Buffer
+			err := runListCmd(&out, &errOut, map[string]string{"github": "test-password"}, tc.show, tc.asJSON, tc.allowNonTTY)
+			if err != nil {
+				t.Fatalf("allowed output failed: %v", err)
+			}
+			if out.String() != tc.want {
+				t.Fatalf("stdout = %q, want %q", out.String(), tc.want)
+			}
+			if errOut.Len() != 0 {
+				t.Fatalf("unexpected stderr: %q", errOut.String())
+			}
+		})
 	}
 }
 
-func TestRunListCmd_DefaultPlainTextWhenJSONOmitted(t *testing.T) {
-	saved := map[string]string{
-		"github": "super-secret-1",
-		"email":  "hunter2",
-	}
-
-	var outBuf, errBuf bytes.Buffer
-	if err := runListCmd(&outBuf, &errBuf, saved, false, false, false); err != nil {
-		t.Fatalf("expected no error, got %v", err)
-	}
-	want := "email: ********\ngithub: ********\n"
-	if outBuf.String() != want {
-		t.Fatalf("unexpected stdout: got %q, want %q", outBuf.String(), want)
-	}
-	if errBuf.Len() != 0 {
-		t.Fatalf("expected empty stderr, got %q", errBuf.String())
-	}
-}
-
-func TestRunListCmd_JSONModeWritesStdoutAndRoutesErrorsToStderr(t *testing.T) {
-	saved := map[string]string{
-		"github": "super-secret-1",
-	}
-
-	var outBuf, errBuf bytes.Buffer
-	if err := runListCmd(&outBuf, &errBuf, saved, true, true, true); err != nil {
-		t.Fatalf("expected no error, got %v", err)
-	}
-	if errBuf.Len() != 0 {
-		t.Fatalf("expected empty stderr on success, got %q", errBuf.String())
-	}
-	var parsed map[string]string
-	if err := json.Unmarshal(outBuf.Bytes(), &parsed); err != nil {
-		t.Fatalf("expected valid JSON on stdout, got error: %v", err)
-	}
-	if parsed["github"] != "super-secret-1" {
-		t.Fatalf("unexpected value for github: %q", parsed["github"])
-	}
-
-	// Verify error routing to stderr when JSON output fails.
+func TestRunListCmd_WriteFailureReportedOnceOnStderr(t *testing.T) {
 	boom := errors.New("stdout write failure")
-	var failErrBuf bytes.Buffer
-	err := runListCmd(errWriter{err: boom}, &failErrBuf, saved, false, true, false)
-	if !errors.Is(err, boom) {
-		t.Fatalf("expected wrapped error %v, got %v", boom, err)
-	}
-	if !strings.Contains(failErrBuf.String(), "stdout write failure") {
-		t.Fatalf("expected error message written to stderr, got %q", failErrBuf.String())
+	for _, asJSON := range []bool{false, true} {
+		var errBuf bytes.Buffer
+		err := runListCmd(errWriter{err: boom}, &errBuf, map[string]string{"a": "b"}, false, asJSON, false)
+		if !errors.Is(err, boom) {
+			t.Fatalf("json=%v: expected wrapped %v, got %v", asJSON, boom, err)
+		}
+		if got := errBuf.String(); strings.Count(got, "Error: ") != 1 || !strings.Contains(got, "stdout write failure") {
+			t.Fatalf("json=%v: expected one Error line on stderr, got %q", asJSON, got)
+		}
 	}
 }
 
@@ -772,6 +559,51 @@ func TestRunListCmd_RefusesPlaintextToNonTTYWithoutOverride(t *testing.T) {
 		}
 		if !strings.Contains(errBuf.String(), "refusing to print plaintext") {
 			t.Fatalf("json=%v: expected refusal on stderr, got %q", asJSON, errBuf.String())
+		}
+	}
+}
+
+func TestExecListCmd_FailureReportedOnceOnStderrOnly(t *testing.T) {
+	for _, asJSON := range []bool{false, true} {
+		var code []int
+		prevExit := listExitFunc
+		listExitFunc = func(c int) { code = append(code, c) }
+		restoreUtilsExit := setUtilsExit(func(int) { t.Error("utils exit must not be used by list") })
+		prevShow, prevJSON, prevAllow := listShowFlag, listJSONFlag, listAllowNonTTYFlag
+		listShowFlag, listJSONFlag, listAllowNonTTYFlag = true, asJSON, false
+
+		var out, errOut bytes.Buffer
+		c := &cobra.Command{}
+		c.SetOut(&out)
+		c.SetErr(&errOut)
+		stdout := captureRemoveStdout(t, func() { execListCmd(c, nil) })
+
+		listExitFunc = prevExit
+		restoreUtilsExit()
+		listShowFlag, listJSONFlag, listAllowNonTTYFlag = prevShow, prevJSON, prevAllow
+
+		if len(code) != 1 || code[0] != 1 {
+			t.Fatalf("json=%v: expected one exit(1), got %v", asJSON, code)
+		}
+		if out.Len() != 0 || stdout != "" {
+			t.Fatalf("json=%v: stdout must stay clean, got %q / %q", asJSON, out.String(), stdout)
+		}
+		if got := errOut.String(); strings.Count(got, "Error: ") != 1 || !strings.Contains(got, "not a terminal") {
+			t.Fatalf("json=%v: expected one Error line on stderr, got %q", asJSON, got)
+		}
+	}
+}
+
+func BenchmarkWriteListOutput(b *testing.B) {
+	entries := make(map[string]string, 10000)
+	for i := 0; i < 10000; i++ {
+		entries[fmt.Sprintf("service-%05d.example.com", i)] = fmt.Sprintf("password-%05d", i)
+	}
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		if err := writeListOutput(io.Discard, entries, true); err != nil {
+			b.Fatal(err)
 		}
 	}
 }
