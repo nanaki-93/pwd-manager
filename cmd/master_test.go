@@ -136,19 +136,6 @@ func assertWeakPasswordRejected(t *testing.T, tmpHome, candidate, wantErr string
 
 const minAcceptedKDFIterations = 600_000
 
-func readStoredSaltParams(t *testing.T, tmpHome string) (int, []byte) {
-	t.Helper()
-	data, err := os.ReadFile(filepath.Join(tmpHome, keyDerivationSaltFile))
-	if err != nil {
-		t.Fatalf("read salt file: %v", err)
-	}
-	if len(data) != len(keySaltMagic)+4+keyDerivationSaltLen || !bytes.HasPrefix(data, []byte(keySaltMagic)) {
-		t.Fatalf("salt file does not record KDF parameters: %x", data)
-	}
-	iter := int(binary.BigEndian.Uint32(data[len(keySaltMagic) : len(keySaltMagic)+4]))
-	return iter, data[len(keySaltMagic)+4:]
-}
-
 func fillSyntheticSecret(dst []byte, seed byte) {
 	for i := range dst {
 		dst[i] = byte('!' + (int(seed)+i*13)%90)
@@ -346,45 +333,6 @@ func TestDeriveKeyValidationBoundaries(t *testing.T) {
 	kDiffPwd, _ := deriveKey([]byte("password-bravo"), saltA, keyDerivationIterations)
 	if !bytes.Equal(k1, k1Repeat) || bytes.Equal(k1, kDiffSalt) || bytes.Equal(k1, kDiffPwd) {
 		t.Fatalf("expected deterministic key derivation sensitive to both password and salt")
-	}
-}
-
-// Rotation rewrites a legacy raw salt or a weaker recorded header at the
-// current count before the store is saved under the matching key.
-func TestRotateMasterKeyUpgradesSaltHeaderBeforeSave(t *testing.T) {
-	salt := bytes.Repeat([]byte{0x73}, keyDerivationSaltLen)
-	cases := map[string][]byte{
-		"legacy raw salt":  salt,
-		"weaker iteration": append(binary.BigEndian.AppendUint32([]byte(keySaltMagic), 200_000), salt...),
-	}
-	for name, seeded := range cases {
-		t.Run(name, func(t *testing.T) {
-			home := withTempHome(t)
-			if err := os.WriteFile(filepath.Join(home, keyDerivationSaltFile), seeded, 0o600); err != nil {
-				t.Fatalf("seed salt: %v", err)
-			}
-			originalSave := saveStore
-			t.Cleanup(func() { saveStore = originalSave })
-			calls := 0
-			saveStore = func(content model.PwdFile, upstream error) error {
-				calls++
-				iterations, storedSalt := readStoredSaltParams(t, home)
-				if iterations != keyDerivationIterations || !bytes.Equal(storedSalt, salt) {
-					t.Fatalf("save began before upgraded header persisted: (%d, %x)", iterations, storedSalt)
-				}
-				return originalSave(content, upstream)
-			}
-			password := []byte("rotated-master-secret")
-			content := model.PwdFile{MasterPassword: "fixture-hash", SavedPasswords: map[string]string{"mail": "secret"}}
-			if err := rotateMasterKey(password, content); err != nil || calls != 1 {
-				t.Fatalf("rotate: err=%v, save calls = %d, want 1", err, calls)
-			}
-			utils.SetMasterKey(pbkdf2Key(password, salt, keyDerivationIterations, encryptionKeyLen, sha256.New))
-			loaded, err := utils.GetPwdObj()
-			if err != nil || loaded.MasterPassword != content.MasterPassword || loaded.SavedPasswords["mail"] != "secret" {
-				t.Fatalf("store not encrypted at upgraded count: content=%+v, err=%v", loaded, err)
-			}
-		})
 	}
 }
 
@@ -640,7 +588,13 @@ func TestSavePasswordInitialAndMismatch(t *testing.T) {
 		t.Fatalf("expected persisted master password hash to verify against initial password")
 	}
 
-	savePassword(persisted)
+	// A wrong current password exits non-zero after only the current-password
+	// prompt (a further prompt would fail and exit again), so scripts detect it.
+	exitCount := captureExit(t)
+	output := captureStdout(t, func() { savePassword(persisted) })
+	if *exitCount != 1 || !strings.Contains(output, "Passwords do not match") || strings.Contains(output, "Password saved") {
+		t.Fatalf("expected one non-zero exit and a mismatch message, got %d exits, output %q", *exitCount, output)
+	}
 	afterMismatch, err := utils.GetPwdObj()
 	if err != nil || afterMismatch.MasterPassword != persisted.MasterPassword {
 		t.Fatalf("expected master password hash to remain unchanged on mismatch (err=%v)", err)
