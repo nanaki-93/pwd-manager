@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -20,124 +21,141 @@ func (w rootErrWriter) Write(_ []byte) (int, error) {
 	return 0, w.err
 }
 
-func TestLoadConfigMissingHomeDirReturnsError(t *testing.T) {
-	wantErr := errors.New("home directory unavailable")
-	var stderr bytes.Buffer
-	cfg := NewConfig("")
-	cfg.HomeDirFunc = func() (string, error) {
-		return "", wantErr
+// writeRootTestConfig writes content to dir/name with owner-only permissions and returns its path.
+func writeRootTestConfig(t *testing.T, dir, name, content string) string {
+	t.Helper()
+	path := filepath.Join(dir, name)
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatalf("write config %s: %v", path, err)
 	}
-	cfg.Stderr = &stderr
+	return path
+}
 
-	err := LoadConfig(cfg)
-	if err == nil {
-		t.Fatal("expected error when home directory lookup fails, got nil")
-	}
-	if !errors.Is(err, wantErr) {
-		t.Fatalf("expected wrapped error %v, got %v", wantErr, err)
+// homeDirIn returns a HomeDirFunc that reports dir.
+func homeDirIn(dir string) func() (string, error) {
+	return func() (string, error) { return dir, nil }
+}
+
+func TestLoadConfigReadsConfigFile(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		file     string
+		key      string
+		value    string
+		explicit bool
+	}{
+		{"explicit file", "config.yaml", "vault", "test", true},
+		{"default file in home", ".pwd-manager.yaml", "profile", "default", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			home := t.TempDir()
+			path := writeRootTestConfig(t, home, tc.file, tc.key+": "+tc.value+"\n")
+			var stderr bytes.Buffer
+			cfg := NewConfig("")
+			cfg.HomeDirFunc = homeDirIn(home)
+			if tc.explicit {
+				cfg.ConfigFile = path
+				cfg.HomeDirFunc = func() (string, error) {
+					t.Fatal("HomeDirFunc should not be called when ConfigFile is set")
+					return "", nil
+				}
+			}
+			cfg.Stderr = &stderr
+
+			if err := LoadConfig(cfg); err != nil {
+				t.Fatalf("LoadConfig returned unexpected error: %v", err)
+			}
+			if cfg.ConfigFileUsed != path {
+				t.Fatalf("expected ConfigFileUsed %q, got %q", path, cfg.ConfigFileUsed)
+			}
+			if got := cfg.Viper.GetString(tc.key); got != tc.value {
+				t.Fatalf("expected viper key %s=%q, got %q", tc.key, tc.value, got)
+			}
+			if !strings.Contains(stderr.String(), "Using config file:") {
+				t.Fatalf("expected stderr notice, got %q", stderr.String())
+			}
+		})
 	}
 }
 
-func TestLoadConfigWithExplicitFile(t *testing.T) {
-	tmpDir := t.TempDir()
-	cfgPath := filepath.Join(tmpDir, "config.yaml")
-	if err := os.WriteFile(cfgPath, []byte("vault: test\n"), 0o600); err != nil {
-		t.Fatalf("write temp config: %v", err)
-	}
-
-	var stderr bytes.Buffer
-	cfg := NewConfig(cfgPath)
-	cfg.HomeDirFunc = func() (string, error) {
-		t.Fatal("HomeDirFunc should not be called when ConfigFile is set")
-		return "", nil
-	}
-	cfg.Stderr = &stderr
-
-	if err := LoadConfig(cfg); err != nil {
-		t.Fatalf("LoadConfig returned unexpected error: %v", err)
-	}
-	if cfg.ConfigFileUsed != cfgPath {
-		t.Fatalf("expected ConfigFileUsed %q, got %q", cfgPath, cfg.ConfigFileUsed)
-	}
-	if got := cfg.Viper.GetString("vault"); got != "test" {
-		t.Fatalf("expected viper key vault=%q, got %q", "test", got)
-	}
-	if !strings.Contains(stderr.String(), "Using config file:") {
-		t.Fatalf("expected stderr notice, got %q", stderr.String())
-	}
-}
-
-func TestLoadConfigFromHomeDirFile(t *testing.T) {
-	homeDir := t.TempDir()
-	cfgPath := filepath.Join(homeDir, ".pwd-manager.yaml")
-	if err := os.WriteFile(cfgPath, []byte("profile: default\n"), 0o600); err != nil {
-		t.Fatalf("write home config: %v", err)
-	}
-
-	var stderr bytes.Buffer
-	cfg := NewConfig("")
-	cfg.HomeDirFunc = func() (string, error) {
-		return homeDir, nil
-	}
-	cfg.Stderr = &stderr
-
-	if err := LoadConfig(cfg); err != nil {
-		t.Fatalf("LoadConfig returned unexpected error: %v", err)
-	}
-	if cfg.ConfigFileUsed == "" {
-		t.Fatal("expected ConfigFileUsed to be populated")
-	}
-	if got := cfg.Viper.GetString("profile"); got != "default" {
-		t.Fatalf("expected viper key profile=%q, got %q", "default", got)
-	}
-	if !strings.Contains(stderr.String(), "Using config file:") {
-		t.Fatalf("expected stderr notice, got %q", stderr.String())
-	}
-}
-
-func TestLoadConfigMalformedHomeDirFileReturnsError(t *testing.T) {
-	homeDir := t.TempDir()
-	cfgPath := filepath.Join(homeDir, ".pwd-manager.yaml")
-	if err := os.WriteFile(cfgPath, []byte(":\tinvalid: [yaml\n"), 0o600); err != nil {
-		t.Fatalf("write malformed home config: %v", err)
-	}
-
-	var stderr bytes.Buffer
-	cfg := NewConfig("")
-	cfg.HomeDirFunc = func() (string, error) {
-		return homeDir, nil
-	}
-	cfg.Stderr = &stderr
-
-	err := LoadConfig(cfg)
-	if err == nil {
-		t.Fatal("expected error when default config file is malformed, got nil")
-	}
-	if !strings.Contains(err.Error(), "read default config") {
-		t.Fatalf("expected wrapped default config error context, got %v", err)
-	}
-	if errors.Unwrap(err) == nil {
-		t.Fatalf("expected wrapped underlying error, got %v", err)
-	}
-	if cfg.ConfigFileUsed != "" {
-		t.Fatalf("expected ConfigFileUsed to remain empty on error, got %q", cfg.ConfigFileUsed)
-	}
-	if stderr.Len() != 0 {
-		t.Fatalf("expected no stderr notice on error, got %q", stderr.String())
-	}
-}
-
-func TestLoadConfigBoundaries(t *testing.T) {
-	if err := LoadConfig(nil); err == nil {
-		t.Fatal("expected error when calling LoadConfig(nil), got nil")
-	}
-
-	emptyHome := t.TempDir()
-	zeroCfg := &Config{
-		HomeDirFunc: func() (string, error) {
-			return emptyHome, nil
+func TestLoadConfigErrors(t *testing.T) {
+	homeErr := errors.New("home directory unavailable")
+	for _, tc := range []struct {
+		name    string
+		setup   func(t *testing.T, dir string) *Config
+		wantIs  error
+		wantMsg string
+		wrapped bool
+	}{
+		{
+			name:    "nil config",
+			setup:   func(*testing.T, string) *Config { return nil },
+			wantMsg: "nil config",
 		},
+		{
+			name: "home directory lookup fails",
+			setup: func(*testing.T, string) *Config {
+				cfg := NewConfig("")
+				cfg.HomeDirFunc = func() (string, error) { return "", homeErr }
+				return cfg
+			},
+			wantIs: homeErr,
+		},
+		{
+			name: "malformed default file",
+			setup: func(t *testing.T, dir string) *Config {
+				writeRootTestConfig(t, dir, ".pwd-manager.yaml", ":\tinvalid: [yaml\n")
+				cfg := NewConfig("")
+				cfg.HomeDirFunc = homeDirIn(dir)
+				return cfg
+			},
+			wantMsg: "read default config",
+			wrapped: true,
+		},
+		{
+			name: "missing explicit file",
+			setup: func(_ *testing.T, dir string) *Config {
+				return NewConfig(filepath.Join(dir, "does-not-exist.yaml"))
+			},
+			wantMsg: "does-not-exist.yaml",
+			wrapped: true,
+		},
+		{
+			name: "malformed explicit file",
+			setup: func(t *testing.T, dir string) *Config {
+				return NewConfig(writeRootTestConfig(t, dir, "malformed.yaml", ":\tbad: [yaml\n"))
+			},
+			wrapped: true,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := tc.setup(t, t.TempDir())
+			var stderr bytes.Buffer
+			if cfg != nil {
+				cfg.Stderr = &stderr
+			}
+			err := LoadConfig(cfg)
+			if err == nil {
+				t.Fatal("expected error, got nil")
+			}
+			if tc.wantIs != nil && !errors.Is(err, tc.wantIs) {
+				t.Fatalf("expected wrapped error %v, got %v", tc.wantIs, err)
+			}
+			if !strings.Contains(err.Error(), tc.wantMsg) {
+				t.Fatalf("expected %q in error, got %v", tc.wantMsg, err)
+			}
+			if tc.wrapped && errors.Unwrap(err) == nil {
+				t.Fatalf("expected wrapped underlying error, got %v", err)
+			}
+			if cfg != nil && (cfg.ConfigFileUsed != "" || stderr.Len() != 0) {
+				t.Fatalf("failed load published as loaded: notice=%q path=%q", stderr.String(), cfg.ConfigFileUsed)
+			}
+		})
 	}
+}
+
+func TestLoadConfigFillsZeroConfigDefaults(t *testing.T) {
+	zeroCfg := &Config{HomeDirFunc: homeDirIn(t.TempDir())}
 	if err := LoadConfig(zeroCfg); err != nil {
 		t.Fatalf("expected zero-initialized Config with missing default file to succeed, got %v", err)
 	}
@@ -147,149 +165,15 @@ func TestLoadConfigBoundaries(t *testing.T) {
 	if zeroCfg.Stderr == nil {
 		t.Fatal("expected LoadConfig to initialize nil Stderr writer")
 	}
-
-	missingPath := filepath.Join(emptyHome, "does-not-exist.yaml")
-	missingExplicit := NewConfig(missingPath)
-	err := LoadConfig(missingExplicit)
-	if err == nil {
-		t.Fatal("expected error when explicit ConfigFile does not exist, got nil")
-	}
-	if !strings.Contains(err.Error(), missingPath) {
-		t.Fatalf("expected explicit config path %q in error, got %v", missingPath, err)
-	}
-	if !errors.Is(err, os.ErrNotExist) && errors.Unwrap(err) == nil {
-		t.Fatalf("expected wrapped underlying error for explicit ConfigFile, got %v", err)
-	}
-
-	malformedExplicitPath := filepath.Join(emptyHome, "malformed.yaml")
-	if writeErr := os.WriteFile(malformedExplicitPath, []byte(":\tbad: [yaml\n"), 0o600); writeErr != nil {
-		t.Fatalf("write malformed explicit config: %v", writeErr)
-	}
-	malformedExplicit := NewConfig(malformedExplicitPath)
-	err = LoadConfig(malformedExplicit)
-	if err == nil {
-		t.Fatal("expected error when explicit ConfigFile is malformed, got nil")
-	}
-	if errors.Unwrap(err) == nil {
-		t.Fatalf("expected wrapped error for malformed explicit ConfigFile, got %v", err)
-	}
 }
 
 func TestLoadConfigStderrWriteError(t *testing.T) {
-	tmpDir := t.TempDir()
-	cfgPath := filepath.Join(tmpDir, "config.yaml")
-	if err := os.WriteFile(cfgPath, []byte("vault: test\n"), 0o600); err != nil {
-		t.Fatalf("write temp config: %v", err)
-	}
-
 	wantErr := errors.New("broken pipe")
-	cfg := NewConfig(cfgPath)
+	cfg := NewConfig(writeRootTestConfig(t, t.TempDir(), "config.yaml", "vault: test\n"))
 	cfg.Stderr = rootErrWriter{err: wantErr}
 
-	err := LoadConfig(cfg)
-	if !errors.Is(err, wantErr) {
+	if err := LoadConfig(cfg); !errors.Is(err, wantErr) {
 		t.Fatalf("expected wrapped stderr write error %v, got %v", wantErr, err)
-	}
-}
-
-func TestContextConfigHelpersBoundary(t *testing.T) {
-	if cfg, ok := ConfigFromContext(nil); ok || cfg != nil {
-		t.Fatalf("expected (nil, false) for nil context, got (%v, %v)", cfg, ok)
-	}
-	if cfg, ok := ConfigFromContext(context.Background()); ok || cfg != nil {
-		t.Fatalf("expected (nil, false) for empty context, got (%v, %v)", cfg, ok)
-	}
-
-	want := NewConfig("custom.yaml")
-	ctx := WithConfig(nil, want)
-	got, ok := ConfigFromContext(ctx)
-	if !ok || got != want {
-		t.Fatalf("expected (%p, true) from WithConfig(nil, ...), got (%p, %v)", want, got, ok)
-	}
-}
-
-func TestCommandRunnerReceivesInjectedConfig(t *testing.T) {
-	injected := NewConfig("")
-	injected.HomeDirFunc = func() (string, error) {
-		return t.TempDir(), nil
-	}
-	if err := LoadConfig(injected); err != nil {
-		t.Fatalf("LoadConfig: %v", err)
-	}
-
-	var received *Config
-	cmd := &cobra.Command{
-		Use:               "test",
-		PersistentPreRunE: rootCmd.PersistentPreRunE,
-		RunE: func(cmd *cobra.Command, args []string) error {
-			cfg, ok := ConfigFromContext(cmd.Context())
-			if !ok {
-				return errors.New("missing config in command context")
-			}
-			received = cfg
-			return nil
-		},
-	}
-	cmd.SetContext(WithConfig(context.Background(), injected))
-
-	if err := cmd.Execute(); err != nil {
-		t.Fatalf("cmd.Execute: %v", err)
-	}
-	if received != injected {
-		t.Fatalf("expected injected config pointer %p, got %p", injected, received)
-	}
-}
-
-func TestPersistentPreRunELoadsAndPropagatesError(t *testing.T) {
-	origCfgFile := cfgFile
-	t.Cleanup(func() {
-		cfgFile = origCfgFile
-	})
-
-	tmpDir := t.TempDir()
-	cfgPath := filepath.Join(tmpDir, "config.yaml")
-	if err := os.WriteFile(cfgPath, []byte("key: val\n"), 0o600); err != nil {
-		t.Fatalf("write temp config: %v", err)
-	}
-	cfgFile = cfgPath
-
-	var stderr bytes.Buffer
-	var loaded *Config
-	cmd := &cobra.Command{
-		Use:               "test-load",
-		SilenceErrors:     true,
-		SilenceUsage:      true,
-		PersistentPreRunE: rootCmd.PersistentPreRunE,
-		RunE: func(cmd *cobra.Command, args []string) error {
-			cfg, ok := ConfigFromContext(cmd.Context())
-			if !ok {
-				return errors.New("expected config in context")
-			}
-			loaded = cfg
-			return nil
-		},
-	}
-	cmd.SetErr(&stderr)
-
-	if err := cmd.Execute(); err != nil {
-		t.Fatalf("cmd.Execute failed: %v", err)
-	}
-	if loaded == nil || loaded.ConfigFileUsed != cfgPath {
-		t.Fatalf("expected loaded ConfigFileUsed %q, got %+v", cfgPath, loaded)
-	}
-
-	cfgFile = filepath.Join(tmpDir, "missing.yaml")
-	failCmd := &cobra.Command{
-		Use:               "test-fail",
-		SilenceErrors:     true,
-		SilenceUsage:      true,
-		PersistentPreRunE: rootCmd.PersistentPreRunE,
-		RunE: func(cmd *cobra.Command, args []string) error {
-			return nil
-		},
-	}
-	if err := failCmd.Execute(); err == nil {
-		t.Fatal("expected error from PersistentPreRunE when explicit config file is missing")
 	}
 }
 
@@ -308,5 +192,150 @@ func TestLoadConfigNilHomeDirFuncUsesPortableLookup(t *testing.T) {
 	}
 	if calls != 1 {
 		t.Fatalf("expected one home lookup, got %d", calls)
+	}
+}
+
+func TestLoadConfigEnvironmentOverrides(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		env      map[string]string
+		withFile bool
+		want     map[string]string
+	}{
+		{"unprefixed env ignored", map[string]string{"VAULT": "attacker"}, true, map[string]string{"vault": "test"}},
+		{"prefixed env overrides file", map[string]string{"PWD_MANAGER_VAULT": "override"}, true, map[string]string{"vault": "override"}},
+		{
+			"unlisted prefixed key ignored",
+			map[string]string{"PWD_MANAGER_UNLISTED_REGRESSION_KEY": "unexpected"}, true,
+			map[string]string{"unlisted_regression_key": ""},
+		},
+		{
+			"without default file",
+			map[string]string{
+				"VAULT":                             "unprefixed-vault",
+				"PROFILE":                           "unprefixed-profile",
+				"PWD_MANAGER_VAULT":                 "namespaced-vault",
+				"PWD_MANAGER_PROFILE":               "namespaced-profile",
+				"PWD_MANAGER_UNLISTED_BOUNDARY_KEY": "unexpected",
+			},
+			false,
+			map[string]string{"vault": "namespaced-vault", "profile": "namespaced-profile", "unlisted_boundary_key": ""},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			for key, value := range tc.env {
+				t.Setenv(key, value)
+			}
+			home := t.TempDir()
+			cfg := NewConfig("")
+			cfg.HomeDirFunc = homeDirIn(home)
+			cfg.Stderr = io.Discard
+			if tc.withFile {
+				cfg.ConfigFile = writeRootTestConfig(t, home, "config.yaml", "vault: test\n")
+			}
+			if err := LoadConfig(cfg); err != nil {
+				t.Fatalf("LoadConfig: %v", err)
+			}
+			for key, want := range tc.want {
+				if got := cfg.Viper.GetString(key); got != want {
+					t.Errorf("config %q = %q, want %q", key, got, want)
+				}
+			}
+			if !tc.withFile && cfg.ConfigFileUsed != "" {
+				t.Fatalf("missing default file reported as loaded: %q", cfg.ConfigFileUsed)
+			}
+		})
+	}
+}
+
+func TestConfigFromContext(t *testing.T) {
+	stored := NewConfig("custom.yaml")
+	for _, tc := range []struct {
+		name string
+		ctx  context.Context
+		want *Config
+	}{
+		{"nil context", nil, nil},
+		{"context without config", context.Background(), nil},
+		{"nil config stored", WithConfig(context.Background(), nil), nil},
+		{"WithConfig on nil parent", WithConfig(nil, stored), stored},
+		{"WithConfig on background", WithConfig(context.Background(), stored), stored},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, ok := ConfigFromContext(tc.ctx)
+			if got != tc.want || ok != (tc.want != nil) {
+				t.Fatalf("ConfigFromContext = (%p, %v), want (%p, %v)", got, ok, tc.want, tc.want != nil)
+			}
+		})
+	}
+}
+
+// runRootPreRun executes a command using rootCmd's PersistentPreRunE and returns the config it saw.
+func runRootPreRun(ctx context.Context) (*Config, error) {
+	var seen *Config
+	cmd := &cobra.Command{
+		Use:               "test",
+		SilenceErrors:     true,
+		SilenceUsage:      true,
+		PersistentPreRunE: rootCmd.PersistentPreRunE,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			cfg, ok := ConfigFromContext(cmd.Context())
+			if !ok {
+				return errors.New("missing config in command context")
+			}
+			seen = cfg
+			return nil
+		},
+	}
+	cmd.SetErr(io.Discard)
+	if ctx != nil {
+		cmd.SetContext(ctx)
+	}
+	err := cmd.Execute()
+	return seen, err
+}
+
+func TestRootPersistentPreRunE(t *testing.T) {
+	origCfgFile := cfgFile
+	t.Cleanup(func() { cfgFile = origCfgFile })
+	dir := t.TempDir()
+	path := writeRootTestConfig(t, dir, "config.yaml", "key: val\n")
+	missing := filepath.Join(dir, "missing.yaml")
+	injected := NewConfig("")
+
+	for _, tc := range []struct {
+		name     string
+		cfgFile  string
+		injected *Config
+		wantUsed string
+		wantErr  bool
+	}{
+		{name: "injected config is kept", cfgFile: missing, injected: injected},
+		{name: "loads --config file", cfgFile: path, wantUsed: path},
+		{name: "missing --config file fails", cfgFile: missing, wantErr: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfgFile = tc.cfgFile
+			var ctx context.Context
+			if tc.injected != nil {
+				ctx = WithConfig(context.Background(), tc.injected)
+			}
+			got, err := runRootPreRun(ctx)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatal("expected error from PersistentPreRunE, got nil")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("cmd.Execute: %v", err)
+			}
+			if tc.injected != nil && got != tc.injected {
+				t.Fatalf("expected injected config %p, got %p", tc.injected, got)
+			}
+			if got.ConfigFileUsed != tc.wantUsed {
+				t.Fatalf("expected ConfigFileUsed %q, got %q", tc.wantUsed, got.ConfigFileUsed)
+			}
+		})
 	}
 }
