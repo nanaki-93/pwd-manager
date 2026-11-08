@@ -3,55 +3,59 @@
 package cmd
 
 import (
-	"io"
+	"bytes"
+	"errors"
 	"os"
-	"path/filepath"
 	"testing"
 )
 
-func TestLoadConfigRejectsWorldWritableConfig(t *testing.T) {
-	cfgPath := filepath.Join(t.TempDir(), "config.yaml")
-	if err := os.WriteFile(cfgPath, []byte("vault: test\n"), 0o600); err != nil {
-		t.Fatalf("write config: %v", err)
-	}
-	if err := os.Chmod(cfgPath, 0o666); err != nil {
-		t.Fatalf("chmod config: %v", err)
-	}
-	cfg := NewConfig(cfgPath)
-	cfg.Stderr = io.Discard
-	if err := LoadConfig(cfg); err == nil {
-		t.Fatalf("LoadConfig error = nil for mode 0666 config, want rejection")
-	}
-	if cfg.ConfigFileUsed != "" {
-		t.Fatalf("ConfigFileUsed = %q, want empty on rejection", cfg.ConfigFileUsed)
-	}
-}
-
-func TestLoadConfigRejectsGroupWritableDefaultConfig(t *testing.T) {
-	home := t.TempDir()
-	cfgPath := filepath.Join(home, ".pwd-manager.yaml")
-	if err := os.WriteFile(cfgPath, []byte("vault: test\n"), 0o600); err != nil {
-		t.Fatalf("write config: %v", err)
-	}
-	if err := os.Chmod(cfgPath, 0o620); err != nil {
-		t.Fatalf("chmod config: %v", err)
-	}
-	cfg := NewConfig("")
-	cfg.HomeDirFunc = func() (string, error) { return home, nil }
-	cfg.Stderr = io.Discard
-	if err := LoadConfig(cfg); err == nil {
-		t.Fatalf("LoadConfig error = nil for mode 0620 config, want rejection")
-	}
-}
-
-func TestLoadConfigAcceptsOwnerOnlyConfig(t *testing.T) {
-	cfgPath := filepath.Join(t.TempDir(), "config.yaml")
-	if err := os.WriteFile(cfgPath, []byte("vault: test\n"), 0o600); err != nil {
-		t.Fatalf("write config: %v", err)
-	}
-	cfg := NewConfig(cfgPath)
-	cfg.Stderr = io.Discard
-	if err := LoadConfig(cfg); err != nil {
-		t.Fatalf("LoadConfig error = %v, want nil", err)
+func TestLoadConfigPermissionBitBoundaries(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		mode        os.FileMode
+		defaultFile bool
+		reject      bool
+	}{
+		{"world-write-only", 0o602, false, true},
+		{"group-write-only", 0o620, false, true},
+		{"group-writable default file", 0o620, true, true},
+		{"owner-only", 0o600, false, false},
+		{"shared-read-only", 0o644, false, false},
+		{"owner-read-only", 0o400, false, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			home := t.TempDir()
+			name := "config.yaml"
+			if tc.defaultFile {
+				name = ".pwd-manager.yaml"
+			}
+			path := writeRootTestConfig(t, home, name, "vault: test\n")
+			if err := os.Chmod(path, tc.mode); err != nil {
+				t.Fatal(err)
+			}
+			var notice bytes.Buffer
+			cfg := NewConfig(path)
+			if tc.defaultFile {
+				cfg.ConfigFile = ""
+				cfg.HomeDirFunc = func() (string, error) { return home, nil }
+			}
+			cfg.Stderr = &notice
+			err := LoadConfig(cfg)
+			if tc.reject {
+				if !errors.Is(err, errInsecureConfigFile) {
+					t.Fatalf("LoadConfig mode %#o = %v, want wrapped insecure-file error", tc.mode, err)
+				}
+				if notice.Len() != 0 || cfg.ConfigFileUsed != "" {
+					t.Fatalf("rejected file published as loaded: notice=%q path=%q", notice.String(), cfg.ConfigFileUsed)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("LoadConfig mode %#o: %v", tc.mode, err)
+			}
+			if cfg.ConfigFileUsed != path {
+				t.Fatalf("ConfigFileUsed = %q, want %q", cfg.ConfigFileUsed, path)
+			}
+		})
 	}
 }
