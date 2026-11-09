@@ -36,8 +36,13 @@ func assertWiped(t *testing.T, b []byte) {
 }
 
 func TestAddPromptedPasswordWipesBytesOnEveryPath(t *testing.T) {
-	origSave, origClip := saveVault, clipboardWriteAll
-	t.Cleanup(func() { saveVault, clipboardWriteAll = origSave, origClip })
+	origSave, origWrite, origRead, origClearer := saveVault, clipboardWriteAll, clipboardReadAll, clipboardClearer
+	t.Cleanup(func() {
+		saveVault, clipboardWriteAll = origSave, origWrite
+		clipboardReadAll, clipboardClearer = origRead, origClearer
+	})
+	clipboardReadAll = func() (string, error) { return "", nil }
+	clipboardClearer = func(string) error { return nil }
 
 	saveErr := errors.New("disk full")
 	clipErr := errors.New("no clipboard")
@@ -175,17 +180,56 @@ func TestVerifyAndClearClipboard(t *testing.T) {
 	}
 }
 
-// stubAddClipboard sets the --copy flag and replaces the clipboard writer for
-// one test, restoring both afterwards.
+// stubAddClipboard sets the --copy flag, replaces the clipboard writer and
+// stubs the clipboard reader and clearer with no-ops for one test, restoring
+// all of them afterwards.
 func stubAddClipboard(t *testing.T, copyFlag bool, write func(string) error) {
 	t.Helper()
-	origClip, origCopy := clipboardWriteAll, addCopyFlag
+	origWrite, origRead, origClearer, origCopy := clipboardWriteAll, clipboardReadAll, clipboardClearer, addCopyFlag
 	t.Cleanup(func() {
-		clipboardWriteAll = origClip
+		clipboardWriteAll = origWrite
+		clipboardReadAll = origRead
+		clipboardClearer = origClearer
 		addCopyFlag = origCopy
 	})
 	clipboardWriteAll = write
+	clipboardReadAll = func() (string, error) { return "", nil }
+	clipboardClearer = func(string) error { return nil }
 	addCopyFlag = copyFlag
+}
+
+func TestStubAddClipboardIsolatesAndRestoresHooks(t *testing.T) {
+	origWrite, origRead, origClearer, origCopy := clipboardWriteAll, clipboardReadAll, clipboardClearer, addCopyFlag
+	t.Cleanup(func() {
+		clipboardWriteAll, clipboardReadAll, clipboardClearer, addCopyFlag = origWrite, origRead, origClearer, origCopy
+	})
+	writeErr, readErr, clearErr := errors.New("original write"), errors.New("original read"), errors.New("original clear")
+	clipboardWriteAll = func(string) error { return writeErr }
+	clipboardReadAll = func() (string, error) { return "original", readErr }
+	clipboardClearer = func(string) error { return clearErr }
+	addCopyFlag = false
+
+	t.Run("stubbed", func(t *testing.T) {
+		stubAddClipboard(t, true, func(string) error { return nil })
+		if !addCopyFlag || clipboardWriteAll("secret") != nil {
+			t.Error("expected copy flag and replacement writer")
+		}
+		if got, err := clipboardReadAll(); got != "" || err != nil {
+			t.Errorf("stubbed read = %q, %v; want empty and nil", got, err)
+		}
+		if err := clipboardClearer("secret"); err != nil {
+			t.Errorf("stubbed clearer: %v", err)
+		}
+	})
+	if addCopyFlag || !errors.Is(clipboardWriteAll(""), writeErr) {
+		t.Error("writer or copy flag not restored")
+	}
+	if got, err := clipboardReadAll(); got != "original" || !errors.Is(err, readErr) {
+		t.Errorf("restored read = %q, %v", got, err)
+	}
+	if err := clipboardClearer("secret"); !errors.Is(err, clearErr) {
+		t.Errorf("restored clearer = %v", err)
+	}
 }
 
 // runExecAdd runs the add command with stdin input and returns its stdout.
