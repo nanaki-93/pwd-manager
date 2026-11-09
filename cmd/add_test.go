@@ -562,21 +562,22 @@ func TestGetPwdObjAfterCheckMasterPropagatesLoadError(t *testing.T) {
 }
 
 func TestGetPwdObjAfterCheckMasterRejectsMismatchedMasterPassword(t *testing.T) {
-	if fi, err := os.Stdin.Stat(); err != nil || (fi.Mode()&os.ModeCharDevice) != 0 {
-		t.Skip("skipping test when stdin is a terminal device")
-	}
-	tmpHome := withTempHome(t)
-	writeTestKey(t, tmpHome, 0x11)
+	_ = withTempHome(t)
 
 	hashed, err := utils.HashMasterPassword([]byte("non-empty-master-secret"))
 	if err != nil {
 		t.Fatalf("failed to hash master password: %v", err)
 	}
+	utils.SetMasterKey([]byte("non-empty-master-secret"))
 	if err := utils.SaveFileErr(model.PwdFile{MasterPassword: hashed}, nil); err != nil {
 		t.Fatalf("SaveFileErr: %v", err)
 	}
 
+	restoreWrongReader := setUtilsReadPassword(func() ([]byte, error) {
+		return []byte("wrong-master-secret"), nil
+	})
 	got, err := utils.GetPwdObjAfterCheckMaster()
+	restoreWrongReader()
 	if err == nil || got.MasterPassword != "" {
 		t.Fatalf("expected error and empty PwdFile on verification failure, got %+v, err=%v", got, err)
 	}
