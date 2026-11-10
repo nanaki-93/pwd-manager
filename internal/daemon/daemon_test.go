@@ -39,6 +39,70 @@ func resetClipboardTestState(t *testing.T) {
 	})
 }
 
+// A shutdown clear that cannot read the clipboard must still clear it
+// unverified, since nothing clears the password after the daemon exits.
+func TestClearClipboardOnShutdownClearsWhenReadFails(t *testing.T) {
+	resetClipboardTestState(t)
+	clipboardOwned, clipboardActivePwd = true, "pending-secret"
+
+	readErr := errors.New("clipboard locked")
+	writeErr := errors.New("clear refused")
+	readClipboard = func() (string, error) { return "", readErr }
+	var writes []string
+	writeClipboard = func(text string) error {
+		writes = append(writes, text)
+		return writeErr
+	}
+
+	err := clearClipboardOnShutdown()
+	if !errors.Is(err, readErr) || !errors.Is(err, writeErr) {
+		t.Fatalf("error = %v, want it to wrap both the read and the clear error", err)
+	}
+	if len(writes) != 1 || writes[0] != "" {
+		t.Fatalf("writes = %q, want one unverified clear", writes)
+	}
+}
+
+func TestClearClipboardOnShutdownReadFailureClearsUnderLock(t *testing.T) {
+	resetClipboardTestState(t)
+	clipboardOwned, clipboardActivePwd = true, "pending-secret"
+	readErr := errors.New("clipboard unavailable")
+	readClipboard = func() (string, error) { return "", readErr }
+	writes := 0
+	writeClipboard = func(text string) error {
+		writes++
+		if text != "" {
+			t.Errorf("write = %q, want empty clipboard", text)
+		}
+		if clipboardClearMu.TryLock() {
+			clipboardClearMu.Unlock()
+			t.Error("clipboardClearMu must be held during the clear")
+		}
+		return nil
+	}
+	if err := clearClipboardOnShutdown(); !errors.Is(err, readErr) {
+		t.Fatalf("error = %v, want wrapped read error", err)
+	}
+	if writes != 1 {
+		t.Fatalf("writes = %d, want 1", writes)
+	}
+}
+
+func TestClearClipboardOnShutdownSkipsUnmatchedClipboard(t *testing.T) {
+	resetClipboardTestState(t)
+	clipboardOwned, clipboardActivePwd = true, "pending-secret"
+
+	readClipboard = func() (string, error) { return "user-copied-text", nil }
+	writeClipboard = func(text string) error {
+		t.Fatalf("unexpected clipboard write %q", text)
+		return nil
+	}
+
+	if err := clearClipboardOnShutdown(); err != nil {
+		t.Fatalf("error = %v, want nil", err)
+	}
+}
+
 func TestCopyPasswordToClipboard_WriteError(t *testing.T) {
 	resetClipboardTestState(t)
 

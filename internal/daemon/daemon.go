@@ -258,7 +258,8 @@ func copyPasswordToClipboard(pwd string) error {
 // clearClipboardOnShutdown runs a pending auto-clear now, synchronously: it
 // stops the clear timer, invalidates the token so no scheduled or retrying
 // clear runs again, and clears the clipboard only if it still holds the
-// active or a stale tracked password. It holds clipboardClearMu throughout,
+// active or a stale tracked password; if the clipboard cannot be read, it
+// clears it unverified and returns the read error. It holds clipboardClearMu throughout,
 // so a clear already running finishes first and no new copy starts meanwhile.
 func clearClipboardOnShutdown() error {
 	clipboardClearMu.Lock()
@@ -283,7 +284,15 @@ func clearClipboardOnShutdown() error {
 
 	current, err := readFn()
 	if err != nil {
-		return fmt.Errorf("read clipboard to clear password on shutdown: %w; it may still be on the clipboard", err)
+		// The clipboard cannot be verified and nothing clears it after
+		// shutdown, so clear it unverified, as the timer path does. The
+		// write is called directly: forceClearClipboard would take
+		// clipboardClearMu again and deadlock.
+		readErr := fmt.Errorf("read clipboard to clear password on shutdown: %w", err)
+		if writeErr := writeFn(""); writeErr != nil {
+			return errors.Join(readErr, fmt.Errorf("clear clipboard without verifying on shutdown: %w; it may still be on the clipboard", writeErr))
+		}
+		return readErr
 	}
 	if !clipboardHoldsAny(current, targets) {
 		return nil
