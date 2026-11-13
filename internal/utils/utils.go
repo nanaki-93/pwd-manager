@@ -681,35 +681,78 @@ func ManageErrorAndExit(err error) {
 	}
 }
 
-func GetPwdObjAfterCheckMaster() (model.PwdFile, error) {
+// ErrWrongMasterPassword reports a master password that does not unlock the store.
+var ErrWrongMasterPassword = errors.New("master passwords do not match")
+
+// storeReadError marks a failure to read or decode the store, which the CLI
+// treats as fatal; its message is the wrapped error's, unchanged.
+type storeReadError struct{ err error }
+
+func (e storeReadError) Error() string { return e.err.Error() }
+func (e storeReadError) Unwrap() error { return e.err }
+
+// requireStoreFile reports an error unless the store exists as a regular file.
+func requireStoreFile() error {
 	pwdPath, err := resolveHomePath(PwdFileName)
 	if err != nil {
-		ManageErrorAndExit(err)
-		return model.PwdFile{}, err
+		return err
 	}
-	if _, err := lstatRegularFile(pwdPath); err != nil {
+	_, err = lstatRegularFile(pwdPath)
+	return err
+}
+
+// GetPwdObjAfterCheckMaster prompts for the master password on stdin and
+// unlocks the store, exiting the process on a missing store or a read failure.
+func GetPwdObjAfterCheckMaster() (model.PwdFile, error) {
+	if err := requireStoreFile(); err != nil {
 		ManageErrorAndExit(err)
 		return model.PwdFile{}, err
 	}
 	pwd := PromptPassword("Enter your master password:")
 	// SetMasterKey keeps its own copy; the prompted buffer is wiped on return.
 	defer wipeBytes(pwd)
+	pwdObj, err := unlockWithPassword(pwd)
+	var readErr storeReadError
+	if errors.As(err, &readErr) {
+		ManageErrorAndExit(readErr.err)
+		return model.PwdFile{}, readErr.err
+	}
+	return pwdObj, err
+}
+
+// UnlockStore unlocks the store with the master password pwd and returns
+// every failure, including a wrong password, as an error instead of exiting,
+// so long-running callers such as the daemon survive it. The caller owns pwd.
+func UnlockStore(pwd []byte) (model.PwdFile, error) {
+	if err := requireStoreFile(); err != nil {
+		return model.PwdFile{}, fmt.Errorf("open password store: %w", err)
+	}
+	pwdObj, err := unlockWithPassword(pwd)
+	if err != nil {
+		return model.PwdFile{}, fmt.Errorf("unlock password store: %w", err)
+	}
+	return pwdObj, nil
+}
+
+// unlockWithPassword sets the master key from pwd, decrypts and verifies the
+// store and upgrades its KDF parameters when needed. Read failures are
+// returned as storeReadError; on any failure the master key is cleared.
+func unlockWithPassword(pwd []byte) (model.PwdFile, error) {
 	SetMasterKey(pwd)
 	pwdObj, storeIter, err := getPwdObjWithIter()
 	if err != nil {
 		SetMasterKey(nil)
 		if errors.Is(err, errDecryptFailed) {
-			return model.PwdFile{}, fmt.Errorf("master passwords do not match")
+			return model.PwdFile{}, ErrWrongMasterPassword
 		}
-		ManageErrorAndExit(err)
-		return model.PwdFile{}, err
+		return model.PwdFile{}, storeReadError{err: err}
 	}
 	// A positive storeIter means the store was AES-GCM authenticated with a key
 	// derived from pwd, which already proves the password; skip a second PBKDF2.
 	// Legacy key-file stores (storeIter 0) decrypt without it, so check the hash.
 	if storeIter == 0 && !VerifyMasterPassword(pwdObj.MasterPassword, pwd) {
 		SetMasterKey(nil)
-		return model.PwdFile{}, fmt.Errorf("master passwords do not match")
+		return model.PwdFile{}, ErrWrongMasterPassword
 	}
 	if err := upgradeKDFIfNeeded(&pwdObj, pwd, storeIter); err != nil {
 		SetMasterKey(nil)

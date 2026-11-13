@@ -50,6 +50,18 @@ func TestGetPwdObjAfterCheckMaster_V3SkipsRedundantHashCheck(t *testing.T) {
 	}
 }
 
+func TestUnlockStoreWrongPasswordReturnsError(t *testing.T) {
+	withTempHome(t)
+	writeV3Store(t, []byte("right-secret"), model.PwdFile{MasterPassword: "x"})
+	got, err := UnlockStore([]byte("wrong-secret"))
+	if !errors.Is(err, ErrWrongMasterPassword) {
+		t.Fatalf("wrong password error = %v", err)
+	}
+	if got.MasterPassword != "" || len(got.SavedPasswords) != 0 || len(getMasterKey()) != 0 {
+		t.Fatal("failed unlock retained store data or master key")
+	}
+}
+
 func TestGetPwdObjAfterCheckMaster_V3WrongPasswordFails(t *testing.T) {
 	withTempHome(t)
 	writeV3Store(t, []byte("v3-right-secret"), model.PwdFile{MasterPassword: "x"})

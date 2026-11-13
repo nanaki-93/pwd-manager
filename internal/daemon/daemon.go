@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/atotto/clipboard"
+	"github.com/nanaki-93/pwd-manager/internal/model"
 	"github.com/nanaki-93/pwd-manager/internal/utils"
 	"github.com/ncruces/zenity"
 	"golang.design/x/hotkey"
@@ -164,30 +165,119 @@ func sortedPasswordNames(saved map[string]string) []string {
 	return keys
 }
 
+const (
+	menuTitle      = "Password Manager"
+	actionCopy     = "Copy password"
+	actionUpdate   = "Update password"
+	masterPrompt   = "Enter your master password"
+	selectPrompt   = "Select a password:"
+	actionPrompt   = "What do you want to do with %q?"
+	newPwdPrompt   = "New password for %q"
+	confirmPrompt  = "Confirm new password for %q"
+	updatedMessage = "Password %q updated."
+)
+
+var (
+	errEmptyNewPassword = errors.New("new password cannot be empty")
+	errPasswordMismatch = errors.New("passwords do not match")
+)
+
+// askSecretFunc asks the user for a secret under prompt; a cancelled dialog
+// returns an error matching zenity.ErrCanceled.
+type askSecretFunc func(prompt string) (string, error)
+
+// askSecretGUI asks for a secret in a zenity password dialog.
+func askSecretGUI(prompt string) (string, error) {
+	_, secret, err := zenity.Password(zenity.Title(prompt))
+	return secret, err
+}
+
 func showPasswordsMenu() {
-	pwdObj, err := utils.GetPwdObjAfterCheckMaster()
+	pwdObj, err := unlockStoreGUI(askSecretGUI)
 	if err != nil {
-		zenity.Error(err.Error(), zenity.Title("Error"))
+		reportMenuError(err)
 		return
 	}
 
 	if len(pwdObj.SavedPasswords) == 0 {
-		zenity.Info("No passwords stored.", zenity.Title("Password Manager"))
+		zenity.Info("No passwords stored.", zenity.Title(menuTitle))
 		return
 	}
 
 	keys := sortedPasswordNames(pwdObj.SavedPasswords)
-
-	selected, err := zenity.List("Select a password to copy:", keys, zenity.Title("Password Manager"))
+	selected, err := zenity.List(selectPrompt, keys, zenity.Title(menuTitle))
+	if err != nil {
+		return // User cancelled
+	}
+	pwd, ok := pwdObj.SavedPasswords[selected]
+	if !ok {
+		return
+	}
+	action, err := zenity.List(fmt.Sprintf(actionPrompt, selected), []string{actionCopy, actionUpdate}, zenity.Title(menuTitle))
 	if err != nil {
 		return // User cancelled
 	}
 
-	if pwd, ok := pwdObj.SavedPasswords[selected]; ok {
+	switch action {
+	case actionCopy:
 		if err := copyPasswordToClipboard(pwd); err != nil {
 			zenity.Error(fmt.Sprintf("Failed to copy password to clipboard: %v", err), zenity.Title("Error"))
 		}
+	case actionUpdate:
+		if err := updateSavedPassword(pwdObj, selected, askSecretGUI, utils.SaveFileErr); err != nil {
+			reportMenuError(err)
+			return
+		}
+		zenity.Info(fmt.Sprintf(updatedMessage, selected), zenity.Title(menuTitle))
 	}
+}
+
+// reportMenuError shows err in an error dialog unless the user cancelled.
+func reportMenuError(err error) {
+	if errors.Is(err, zenity.ErrCanceled) {
+		return
+	}
+	zenity.Error(err.Error(), zenity.Title("Error"))
+}
+
+// unlockStoreGUI asks for the master password with ask and unlocks the store,
+// returning every failure as an error so the daemon keeps running.
+func unlockStoreGUI(ask askSecretFunc) (model.PwdFile, error) {
+	master, err := ask(masterPrompt)
+	if err != nil {
+		return model.PwdFile{}, fmt.Errorf("read master password: %w", err)
+	}
+	masterBytes := []byte(master)
+	defer clear(masterBytes)
+	return utils.UnlockStore(masterBytes)
+}
+
+// updateSavedPassword asks twice for a new value of the entry name and saves
+// it with save. A cancelled dialog, an empty value or a mismatched
+// confirmation leaves the store untouched; a failed save restores the entry.
+func updateSavedPassword(pwdObj model.PwdFile, name string, ask askSecretFunc, save func(model.PwdFile, error) error) error {
+	newPwd, err := ask(fmt.Sprintf(newPwdPrompt, name))
+	if err != nil {
+		return fmt.Errorf("read new password for %q: %w", name, err)
+	}
+	if newPwd == "" {
+		return fmt.Errorf("update password %q: %w", name, errEmptyNewPassword)
+	}
+	confirm, err := ask(fmt.Sprintf(confirmPrompt, name))
+	if err != nil {
+		return fmt.Errorf("confirm new password for %q: %w", name, err)
+	}
+	if subtle.ConstantTimeCompare([]byte(newPwd), []byte(confirm)) != 1 {
+		return fmt.Errorf("update password %q: %w", name, errPasswordMismatch)
+	}
+
+	prev := pwdObj.SavedPasswords[name]
+	pwdObj.SavedPasswords[name] = newPwd
+	if err := save(pwdObj, nil); err != nil {
+		pwdObj.SavedPasswords[name] = prev
+		return fmt.Errorf("save password %q: %w", name, err)
+	}
+	return nil
 }
 
 // copyPasswordToClipboard writes pwd to the system clipboard, together with
