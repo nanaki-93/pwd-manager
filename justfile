@@ -1,6 +1,8 @@
 # Standardized repository entrypoint for pwd-manager
 set shell := ["sh", "-cu"]
 
+install_dir := env_var_or_default("INSTALL_DIR", env_var("HOME") / "DEV/programs/pwd-manager")
+
 default:
     @just --list
 
@@ -26,3 +28,9 @@ check:
     test -z "$(gofmt -l .)"
     go vet ./...
     go test -race ./...
+
+# Build pwd-manager and replace the installed binary (override dir with INSTALL_DIR)
+install:
+    mkdir -p "{{install_dir}}"
+    go build -o "{{install_dir}}/.pwd-manager.tmp" .
+    mv -f "{{install_dir}}/.pwd-manager.tmp" "{{install_dir}}/pwd-manager"
