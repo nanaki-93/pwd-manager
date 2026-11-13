@@ -29,8 +29,9 @@ check:
     go vet ./...
     go test -race ./...
 
-# Build pwd-manager and replace the installed binary (override dir with INSTALL_DIR)
+# Build pwd-manager, replace the installed binary and restart its daemon (override dir with INSTALL_DIR)
 install:
     mkdir -p "{{install_dir}}"
     go build -o "{{install_dir}}/.pwd-manager.tmp" .
     mv -f "{{install_dir}}/.pwd-manager.tmp" "{{install_dir}}/pwd-manager"
+    nohup "{{install_dir}}/pwd-manager" daemon --restart >"{{install_dir}}/daemon.log" 2>&1 &

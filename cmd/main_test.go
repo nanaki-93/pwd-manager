@@ -1,8 +1,10 @@
 package cmd
 
 import (
+	"fmt"
 	"hash"
 	"os"
+	"path/filepath"
 	"testing"
 
 	"golang.org/x/crypto/pbkdf2"
@@ -35,9 +37,27 @@ func useRealKDF(t *testing.T) {
 // `add --copy` schedules clearing; tests that cover clearing stub it themselves.
 // It also scales cmd's own PBKDF2 work down; internal/utils exposes no KDF
 // override outside its own tests, so derivations there run at full cost.
+// It points HOME and XDG_CACHE_HOME at a temporary directory so daemon tests
+// never write the real daemon pidfile.
 func TestMain(m *testing.M) {
 	clipboardClearer = func(string) error { return nil }
 	clipboardReadAll = func() (string, error) { return "", nil }
 	pbkdf2Key = fastPBKDF2Key
-	os.Exit(m.Run())
+	os.Exit(runIsolated(m))
+}
+
+func runIsolated(m *testing.M) int {
+	home, err := os.MkdirTemp("", "pwd-manager-cmd-test")
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "create test home: %v\n", err)
+		return 1
+	}
+	defer os.RemoveAll(home)
+	for key, value := range map[string]string{"HOME": home, "XDG_CACHE_HOME": filepath.Join(home, ".cache")} {
+		if err := os.Setenv(key, value); err != nil {
+			fmt.Fprintf(os.Stderr, "set %s: %v\n", key, err)
+			return 1
+		}
+	}
+	return m.Run()
 }

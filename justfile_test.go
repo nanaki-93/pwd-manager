@@ -19,6 +19,40 @@ func readInstalledBinary(t *testing.T, path string) []byte {
 	return data
 }
 
+func checkInstalledStub(t *testing.T, got []byte, failed bool) {
+	t.Helper()
+	if failed && string(got) != "old" {
+		t.Fatalf("failed build replaced binary: %q", got)
+	}
+	if !failed && !strings.HasPrefix(string(got), "#!/bin/sh\n") {
+		t.Fatalf("installed binary = %q, want runnable stub", got)
+	}
+}
+
+func checkDaemonArgs(t *testing.T, path string, failed bool) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		args, err := os.ReadFile(path)
+		if err == nil {
+			if failed || string(args) != "daemon --restart\n" {
+				t.Fatalf("daemon arguments = %q after failed build %v", args, failed)
+			}
+			return
+		}
+		if !os.IsNotExist(err) {
+			t.Fatal(err)
+		}
+		if time.Now().After(deadline) {
+			if !failed {
+				t.Fatal("installed daemon was not started")
+			}
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
 func TestJustInstallReplacesBinaryOnlyAfterSuccessfulBuild(t *testing.T) {
 	just, err := exec.LookPath("just")
 	if err != nil {
@@ -47,7 +81,7 @@ func TestJustInstallReplacesBinaryOnlyAfterSuccessfulBuild(t *testing.T) {
 				t.Fatal(err)
 			}
 			bin := t.TempDir()
-			stub := "#!/bin/sh\n[ \"$1\" = build ] && [ \"$2\" = -o ] && [ \"$4\" = . ] || exit 2\nprintf new > \"$3\"\n[ \"$FAIL_BUILD\" != 1 ]\n"
+			stub := "#!/bin/sh\n[ \"$1\" = build ] && [ \"$2\" = -o ] && [ \"$4\" = . ] || exit 2\nprintf '#!/bin/sh\\nprintf \"%%s\\\\n\" \"$*\" > \"$HOME/daemon-args\"\\n' > \"$3\"\nchmod +x \"$3\"\n[ \"$FAIL_BUILD\" != 1 ]\n"
 			if err := os.WriteFile(filepath.Join(bin, "go"), []byte(stub), 0o755); err != nil {
 				t.Fatal(err)
 			}
@@ -71,13 +105,8 @@ func TestJustInstallReplacesBinaryOnlyAfterSuccessfulBuild(t *testing.T) {
 				t.Fatalf("just install error = %v, output: %s", err, out)
 			}
 			got := readInstalledBinary(t, binary)
-			want := "new"
-			if tc.fail {
-				want = "old"
-			}
-			if string(got) != want {
-				t.Fatalf("binary = %q, want %q", got, want)
-			}
+			checkInstalledStub(t, got, tc.fail)
+			checkDaemonArgs(t, filepath.Join(home, "daemon-args"), tc.fail)
 		})
 	}
 }

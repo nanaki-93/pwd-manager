@@ -6,9 +6,11 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/signal"
 	"runtime"
 	"slices"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/atotto/clipboard"
@@ -112,10 +114,14 @@ func ConcealedClipboardFlags(goos string) []string {
 // Start runs the hotkey daemon on the main thread until ctx is cancelled or
 // the hotkey stops, and returns any startup failure, such as a hotkey that
 // cannot be registered. A ctx already cancelled returns its error unstarted.
+// SIGTERM, SIGINT and SIGHUP cancel ctx too, so a pending clipboard clear
+// still runs when the daemon is stopped or restarted.
 func Start(ctx context.Context) error {
 	if err := ctx.Err(); err != nil {
 		return fmt.Errorf("daemon cancelled before start: %w", err)
 	}
+	ctx, stop := signal.NotifyContext(ctx, syscall.SIGTERM, os.Interrupt, syscall.SIGHUP)
+	defer stop()
 	var err error
 	mainthread.Init(func() {
 		err = listenForHotkey(ctx)
