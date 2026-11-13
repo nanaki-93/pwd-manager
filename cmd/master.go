@@ -224,7 +224,9 @@ func (p *pendingKey) install(content *model.PwdFile) error {
 	if err != nil {
 		return err
 	}
-	utils.SetMasterKey(p.key)
+	// utils derives the store key from the raw password itself, the same way
+	// unlocking does, so the password and not p.key becomes the master secret.
+	utils.SetMasterKey(p.password)
 	if content == nil {
 		return finishSalt(false)
 	}
@@ -253,16 +255,19 @@ func validateMasterPassword(password []byte) error {
 	return nil
 }
 
-// pendingKey is a derived key that has not been put into use yet.
+// pendingKey is a derived key that has not been put into use yet, with a copy
+// of the master password it was derived from.
 type pendingKey struct {
 	salt      []byte
 	key       []byte
+	password  []byte
 	writeSalt bool
 }
 
 func (p *pendingKey) wipe() {
 	clear(p.salt)
 	clear(p.key)
+	clear(p.password)
 }
 
 // persistSalt writes new salts and salt files with outdated parameters with
@@ -352,7 +357,8 @@ func prepareKey(pwd []byte, upgrade bool) (*pendingKey, error) {
 		clear(salt)
 		return nil, err
 	}
-	return &pendingKey{salt: salt, key: derivedKey, writeSalt: writeSalt}, nil
+	password := bytes.Clone(pwd)
+	return &pendingKey{salt: salt, key: derivedKey, password: password, writeSalt: writeSalt}, nil
 }
 
 // loadOrCreateKeySalt fills salt from the salt file, or with random bytes when

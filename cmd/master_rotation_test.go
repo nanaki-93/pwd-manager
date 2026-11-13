@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"crypto/aes"
 	"crypto/cipher"
-	"crypto/sha256"
 	"encoding/binary"
 	"encoding/json"
 	"errors"
@@ -94,12 +93,33 @@ func TestRotateMasterKeyUpgradesSaltHeaderBeforeSave(t *testing.T) {
 			if err := rotateMasterKey(password, content); err != nil || calls != 1 {
 				t.Fatalf("rotate: err=%v, save calls = %d, want 1", err, calls)
 			}
-			utils.SetMasterKey(pbkdf2Key(password, salt, keyDerivationIterations, encryptionKeyLen, sha256.New))
+			utils.SetMasterKey(password)
 			loaded, err := utils.GetPwdObj()
 			if err != nil || loaded.MasterPassword != content.MasterPassword || loaded.SavedPasswords["mail"] != "secret" {
 				t.Fatalf("store not encrypted at upgraded count: content=%+v, err=%v", loaded, err)
 			}
 		})
+	}
+}
+
+// A rotated store must unlock with the raw new password, the secret unlocking
+// derives the store key from; installing the PBKDF2 output instead made the
+// store encrypted under a key no unlock could reproduce.
+func TestRotateMasterKeyThenUnlockStoreWithPassword(t *testing.T) {
+	withTempHome(t)
+	password := []byte("rotated-master-secret")
+	hash, err := utils.HashMasterPassword(password)
+	if err != nil {
+		t.Fatalf("hash: %v", err)
+	}
+	content := model.PwdFile{MasterPassword: hash, SavedPasswords: map[string]string{"mail": "secret"}}
+	if err := rotateMasterKey(password, content); err != nil {
+		t.Fatalf("rotate: %v", err)
+	}
+	utils.SetMasterKey(nil)
+	loaded, err := utils.UnlockStore(password)
+	if err != nil || loaded.SavedPasswords["mail"] != "secret" {
+		t.Fatalf("rotated store did not unlock with the new password: content=%+v, err=%v", loaded, err)
 	}
 }
 
