@@ -13,12 +13,11 @@ import (
 	"syscall"
 	"time"
 
+	"fyne.io/fyne/v2"
+	"fyne.io/fyne/v2/app"
 	"github.com/atotto/clipboard"
-	"github.com/nanaki-93/pwd-manager/internal/model"
-	"github.com/nanaki-93/pwd-manager/internal/utils"
-	"github.com/ncruces/zenity"
+	"github.com/nanaki-93/pwd-manager/internal/ui"
 	"golang.design/x/hotkey"
-	"golang.design/x/hotkey/mainthread"
 )
 
 // DefaultClipboardClearTimeout defines the retention window before a copied
@@ -59,7 +58,12 @@ var (
 	// notifyClipboardClearFailure shows the final auto-clear outcome in a
 	// visible desktop notification, since a GUI daemon user rarely sees stderr.
 	notifyClipboardClearFailure = func(msg string) error {
-		return zenity.Notify(msg, zenity.Title("Password Manager"))
+		a := fyne.CurrentApp()
+		if a == nil {
+			return errors.New("no desktop app is running to show the notification")
+		}
+		a.SendNotification(fyne.NewNotification(ui.Title, msg))
+		return nil
 	}
 
 	// clipboardClearMu serializes a clear's verify-then-write against the
@@ -111,34 +115,74 @@ func ConcealedClipboardFlags(goos string) []string {
 	}
 }
 
-// Start runs the hotkey daemon on the main thread until ctx is cancelled or
-// the hotkey stops, and returns any startup failure, such as a hotkey that
-// cannot be registered. A ctx already cancelled returns its error unstarted.
-// SIGTERM, SIGINT and SIGHUP cancel ctx too, so a pending clipboard clear
-// still runs when the daemon is stopped or restarted.
+// appID identifies the desktop app to the OS (notifications, preferences).
+const appID = "io.github.nanaki-93.pwd-manager"
+
+// Start runs the desktop app on the main thread until ctx is cancelled, the
+// hotkey stops or the app quits, and returns any failure, such as a hotkey
+// that cannot be registered. Ctrl+Shift+P opens the password window. A ctx
+// already cancelled returns its error unstarted. SIGTERM, SIGINT and SIGHUP
+// cancel ctx too, so a pending clipboard clear still runs when the daemon is
+// stopped or restarted.
 func Start(ctx context.Context) error {
 	if err := ctx.Err(); err != nil {
 		return fmt.Errorf("daemon cancelled before start: %w", err)
 	}
 	ctx, stop := signal.NotifyContext(ctx, syscall.SIGTERM, os.Interrupt, syscall.SIGHUP)
 	defer stop()
-	var err error
-	mainthread.Init(func() {
-		err = listenForHotkey(ctx)
-	})
-	return err
+	a := app.NewWithID(appID)
+	win := ui.New(a, newStoreVault())
+	return runApp(ctx, a, win.Show, registerHotkey)
 }
 
-func listenForHotkey(ctx context.Context) error {
+// hotkeyRegistrar registers the global hotkey and returns its keydown events
+// and the function that unregisters it.
+type hotkeyRegistrar func() (<-chan hotkey.Event, func() error, error)
+
+func registerHotkey() (<-chan hotkey.Event, func() error, error) {
 	hk := hotkey.New([]hotkey.Modifier{hotkey.ModCtrl, hotkey.ModShift}, hotkey.KeyP)
 	if err := hk.Register(); err != nil {
-		return fmt.Errorf("register hotkey Ctrl+Shift+P: %w", err)
+		return nil, nil, fmt.Errorf("register hotkey Ctrl+Shift+P: %w", err)
 	}
-	defer hk.Unregister()
+	return hk.Keydown(), hk.Unregister, nil
+}
 
-	fmt.Println("Daemon running. Press Ctrl+Shift+P to list passwords.")
-
-	return serveHotkey(ctx, hk.Keydown(), showPasswordsMenu)
+// runApp runs a until ctx is cancelled, the hotkey events stop or a quits.
+// Once a has started, it registers the hotkey on the main thread and serves
+// it in a goroutine that calls show on the main thread for each press and
+// quits a when it stops. After a returns, runApp stops that goroutine, which
+// clears a pending clipboard password, and returns its error.
+func runApp(ctx context.Context, a fyne.App, show func(), register hotkeyRegistrar) error {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	started := make(chan struct{})
+	served := make(chan error, 1)
+	a.Lifecycle().SetOnStarted(func() {
+		close(started)
+		keydown, unregister, err := register()
+		if err != nil {
+			served <- err
+			a.Quit()
+			return
+		}
+		fmt.Println("Daemon running. Press Ctrl+Shift+P to open the password manager.")
+		go func() {
+			err := serveHotkey(ctx, keydown, func() { fyne.Do(show) })
+			if unregErr := unregister(); unregErr != nil {
+				err = errors.Join(err, fmt.Errorf("unregister hotkey Ctrl+Shift+P: %w", unregErr))
+			}
+			served <- err
+			a.Quit()
+		}()
+	})
+	a.Run()
+	cancel()
+	select {
+	case <-started:
+		return <-served
+	default:
+		return clearClipboardOnShutdown()
+	}
 }
 
 // serveHotkey calls onPress for each keydown event until ctx is cancelled
@@ -169,126 +213,6 @@ func sortedPasswordNames(saved map[string]string) []string {
 	}
 	slices.Sort(keys)
 	return keys
-}
-
-const (
-	menuTitle      = "Password Manager"
-	actionCopy     = "Copy password"
-	actionUpdate   = "Update password"
-	masterPrompt   = "Enter your master password"
-	selectPrompt   = "Select a password:"
-	actionPrompt   = "What do you want to do with %q?"
-	newPwdPrompt   = "New password for %q"
-	confirmPrompt  = "Confirm new password for %q"
-	updatedMessage = "Password %q updated."
-)
-
-var (
-	errEmptyNewPassword = errors.New("new password cannot be empty")
-	errPasswordMismatch = errors.New("passwords do not match")
-)
-
-// askSecretFunc asks the user for a secret under prompt; a cancelled dialog
-// returns an error matching zenity.ErrCanceled.
-type askSecretFunc func(prompt string) (string, error)
-
-// askSecretGUI asks for a secret in a zenity password dialog.
-func askSecretGUI(prompt string) (string, error) {
-	_, secret, err := zenity.Password(zenity.Title(prompt))
-	return secret, err
-}
-
-func showPasswordsMenu() {
-	pwdObj, err := unlockStoreGUI(utils.UnlockStoreBiometric, askSecretGUI)
-	if err != nil {
-		reportMenuError(err)
-		return
-	}
-
-	if len(pwdObj.SavedPasswords) == 0 {
-		zenity.Info("No passwords stored.", zenity.Title(menuTitle))
-		return
-	}
-
-	keys := sortedPasswordNames(pwdObj.SavedPasswords)
-	selected, err := zenity.List(selectPrompt, keys, zenity.Title(menuTitle))
-	if err != nil {
-		return // User cancelled
-	}
-	pwd, ok := pwdObj.SavedPasswords[selected]
-	if !ok {
-		return
-	}
-	action, err := zenity.List(fmt.Sprintf(actionPrompt, selected), []string{actionCopy, actionUpdate}, zenity.Title(menuTitle))
-	if err != nil {
-		return // User cancelled
-	}
-
-	switch action {
-	case actionCopy:
-		if err := copyPasswordToClipboard(pwd); err != nil {
-			zenity.Error(fmt.Sprintf("Failed to copy password to clipboard: %v", err), zenity.Title("Error"))
-		}
-	case actionUpdate:
-		if err := updateSavedPassword(pwdObj, selected, askSecretGUI, utils.SaveFileErr); err != nil {
-			reportMenuError(err)
-			return
-		}
-		zenity.Info(fmt.Sprintf(updatedMessage, selected), zenity.Title(menuTitle))
-	}
-}
-
-// reportMenuError shows err in an error dialog unless the user cancelled.
-func reportMenuError(err error) {
-	if errors.Is(err, zenity.ErrCanceled) {
-		return
-	}
-	zenity.Error(err.Error(), zenity.Title("Error"))
-}
-
-// unlockStoreGUI unlocks the store with Touch ID through unlockBiometric and,
-// when that is unavailable, asks for the master password with ask, returning
-// every failure as an error so the daemon keeps running.
-func unlockStoreGUI(unlockBiometric func() (model.PwdFile, error), ask askSecretFunc) (model.PwdFile, error) {
-	pwdObj, err := unlockBiometric()
-	if !errors.Is(err, utils.ErrBiometricUnavailable) {
-		return pwdObj, err
-	}
-	master, err := ask(masterPrompt)
-	if err != nil {
-		return model.PwdFile{}, fmt.Errorf("read master password: %w", err)
-	}
-	masterBytes := []byte(master)
-	defer clear(masterBytes)
-	return utils.UnlockStore(masterBytes)
-}
-
-// updateSavedPassword asks twice for a new value of the entry name and saves
-// it with save. A cancelled dialog, an empty value or a mismatched
-// confirmation leaves the store untouched; a failed save restores the entry.
-func updateSavedPassword(pwdObj model.PwdFile, name string, ask askSecretFunc, save func(model.PwdFile, error) error) error {
-	newPwd, err := ask(fmt.Sprintf(newPwdPrompt, name))
-	if err != nil {
-		return fmt.Errorf("read new password for %q: %w", name, err)
-	}
-	if newPwd == "" {
-		return fmt.Errorf("update password %q: %w", name, errEmptyNewPassword)
-	}
-	confirm, err := ask(fmt.Sprintf(confirmPrompt, name))
-	if err != nil {
-		return fmt.Errorf("confirm new password for %q: %w", name, err)
-	}
-	if subtle.ConstantTimeCompare([]byte(newPwd), []byte(confirm)) != 1 {
-		return fmt.Errorf("update password %q: %w", name, errPasswordMismatch)
-	}
-
-	prev := pwdObj.SavedPasswords[name]
-	pwdObj.SavedPasswords[name] = newPwd
-	if err := save(pwdObj, nil); err != nil {
-		pwdObj.SavedPasswords[name] = prev
-		return fmt.Errorf("save password %q: %w", name, err)
-	}
-	return nil
 }
 
 // copyPasswordToClipboard writes pwd to the system clipboard, together with

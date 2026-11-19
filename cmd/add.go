@@ -13,7 +13,6 @@ import (
 	"io"
 	"os"
 	"strings"
-	"unicode"
 	"unicode/utf8"
 )
 
@@ -45,7 +44,7 @@ func readPwdName(r io.Reader) (string, error) {
 		}
 		return "", errors.New("password name cannot be empty")
 	}
-	if err := validatePwdName(pwdName); err != nil {
+	if err := model.ValidatePwdName(pwdName); err != nil {
 		return "", fmt.Errorf("read password name: %w", err)
 	}
 	return pwdName, nil
@@ -71,32 +70,14 @@ func readBoundedLine(reader *bufio.Reader, limit int) (string, error) {
 }
 
 // maxPwdNameLen bounds the length, in characters, of an entry name.
-const maxPwdNameLen = 128
+const maxPwdNameLen = model.MaxPwdNameLen
 
 // maxPwdNameLineBytes bounds the bytes read for a name line: the longest
 // valid name in UTF-8 plus a "\r\n" terminator.
 const maxPwdNameLineBytes = maxPwdNameLen*utf8.UTFMax + len("\r\n")
 
-// errInvalidPwdName reports an entry name that is too long, not valid UTF-8
-// or contains non-printable characters such as control or escape bytes.
-var errInvalidPwdName = errors.New("invalid password name")
-
-// validatePwdName rejects names that could inject terminal escape sequences or
-// control characters when echoed in prompts or listed from the vault later.
-func validatePwdName(name string) error {
-	if !utf8.ValidString(name) {
-		return fmt.Errorf("%w: not valid UTF-8", errInvalidPwdName)
-	}
-	if n := utf8.RuneCountInString(name); n > maxPwdNameLen {
-		return fmt.Errorf("%w: %d characters exceeds the maximum of %d", errInvalidPwdName, n, maxPwdNameLen)
-	}
-	for _, r := range name {
-		if !unicode.IsPrint(r) {
-			return fmt.Errorf("%w: contains non-printable character %q", errInvalidPwdName, r)
-		}
-	}
-	return nil
-}
+// errInvalidPwdName reports an entry name rejected by model.ValidatePwdName.
+var errInvalidPwdName = model.ErrInvalidPwdName
 
 func canSavePassword(savedPasswords map[string]string, pwdName string, r io.Reader) (bool, error) {
 	if _, exists := savedPasswords[pwdName]; !exists {

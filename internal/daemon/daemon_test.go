@@ -8,40 +8,27 @@ import (
 	"time"
 
 	"github.com/nanaki-93/pwd-manager/internal/model"
-	"github.com/ncruces/zenity"
 )
 
 func TestUpdateSavedPassword(t *testing.T) {
 	saveErr := errors.New("save failed")
 	tests := []struct {
 		name     string
-		answers  []string
-		cancelAt int
+		newPwd   string
+		confirm  string
 		wantErr  error
 		wantSave bool
 		failSave bool
 	}{
-		{name: "updated", answers: []string{"new", "new"}, wantSave: true},
-		{name: "empty", answers: []string{""}, wantErr: errEmptyNewPassword},
-		{name: "mismatch", answers: []string{"new", "other"}, wantErr: errPasswordMismatch},
-		{name: "cancel initial", cancelAt: 1, wantErr: zenity.ErrCanceled},
-		{name: "cancel confirmation", answers: []string{"new"}, cancelAt: 2, wantErr: zenity.ErrCanceled},
-		{name: "save failure", answers: []string{"new", "new"}, wantSave: true, failSave: true, wantErr: saveErr},
+		{name: "updated", newPwd: "new", confirm: "new", wantSave: true},
+		{name: "empty", newPwd: "", confirm: "", wantErr: errEmptyNewPassword},
+		{name: "mismatch", newPwd: "new", confirm: "other", wantErr: errPasswordMismatch},
+		{name: "save failure", newPwd: "new", confirm: "new", wantSave: true, failSave: true, wantErr: saveErr},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			store := model.PwdFile{SavedPasswords: map[string]string{"site": "old", "other": "unchanged"}}
-			calls, saves := 0, 0
-			ask := func(prompt string) (string, error) {
-				calls++
-				if calls == tt.cancelAt {
-					return "", zenity.ErrCanceled
-				}
-				if calls > len(tt.answers) {
-					t.Fatalf("unexpected prompt: %s", prompt)
-				}
-				return tt.answers[calls-1], nil
-			}
+			saves := 0
 			save := func(got model.PwdFile, err error) error {
 				saves++
 				if err != nil || got.SavedPasswords["site"] != "new" || got.SavedPasswords["other"] != "unchanged" {
@@ -52,7 +39,7 @@ func TestUpdateSavedPassword(t *testing.T) {
 				}
 				return nil
 			}
-			err := updateSavedPassword(store, "site", ask, save)
+			err := updateSavedPassword(store, "site", tt.newPwd, tt.confirm, save)
 			if !errors.Is(err, tt.wantErr) {
 				t.Fatalf("error = %v, want %v", err, tt.wantErr)
 			}

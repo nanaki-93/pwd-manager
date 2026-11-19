@@ -12,6 +12,9 @@ var daemonCmd = &cobra.Command{
 	Use:   "daemon",
 	Short: "Start background service for hotkey password access",
 	Long: "Start background service for hotkey password access.\n\n" +
+		"Ctrl+Shift+P opens the password window: unlock it with Touch ID or the master password, " +
+		"then copy, edit, add or delete passwords. Closing or locking the window locks the store again; " +
+		"copied passwords are cleared from the clipboard automatically.\n\n" +
 		"The daemon records its pid in the user cache dir; --restart stops the daemon recorded there first.",
 	Args: cobra.NoArgs,
 	RunE: func(cmd *cobra.Command, args []string) error {

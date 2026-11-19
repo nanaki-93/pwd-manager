@@ -15,6 +15,10 @@ A local command-line password manager written in Go. Passwords are encrypted on 
 | `pwd-manager touchid enable` | Unlock with Touch ID instead of typing the master password (macOS) |
 | `pwd-manager touchid disable` | Stop using Touch ID and remove the saved master password |
 
+## Password window
+
+While `pwd-manager daemon` runs, Ctrl+Shift+P opens the password window. Unlock it with Touch ID (when enabled) or your master password. Then you can copy, edit, add or delete passwords. Copied passwords are cleared from the clipboard automatically. Type in the search field to filter the list. Closing the window, pressing Lock or leaving it idle for two minutes locks the store again.
+
 ## Touch ID (macOS)
 
 `pwd-manager touchid enable` checks your fingerprint, verifies your master password and saves it in the macOS Keychain (service `pwd-manager`, account `master`, this device only). It also creates `~/.pwd-mng-touchid`. While that file exists, `get`, `list`, `add`, `remove` and the daemon show a Touch ID prompt first, then unlock the store with the saved password.
@@ -23,7 +27,7 @@ If Touch ID is unavailable, you cancel the prompt or the saved password no longe
 
 ## Build and test
 
-Requires Go 1.23+ and [just](https://github.com/casey/just).
+Requires Go 1.23+ and [just](https://github.com/casey/just). The password window uses [Fyne](https://fyne.io), so building needs cgo and the OpenGL development headers (on Linux, for example `libgl1-mesa-dev` and `xorg-dev`).
 
 ```sh
 just setup   # download modules, install git hooks
