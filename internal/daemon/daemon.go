@@ -148,10 +148,12 @@ func registerHotkey() (<-chan hotkey.Event, func() error, error) {
 }
 
 // runApp runs a until ctx is cancelled, the hotkey events stop or a quits.
-// Once a has started, it registers the hotkey on the main thread and serves
-// it in a goroutine that calls show on the main thread for each press and
-// quits a when it stops. After a returns, runApp stops that goroutine, which
-// clears a pending clipboard password, and returns its error.
+// Once a has started, a goroutine registers the hotkey off the main thread
+// (on macOS, Register and Unregister dispatch_sync to the main queue, which
+// traps when called from it), serves it by calling show on the main thread
+// for each press, unregisters it and quits a when it stops. After a returns,
+// runApp stops that goroutine, which clears a pending clipboard password,
+// and returns its error.
 func runApp(ctx context.Context, a fyne.App, show func(), register hotkeyRegistrar) error {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
@@ -159,19 +161,8 @@ func runApp(ctx context.Context, a fyne.App, show func(), register hotkeyRegistr
 	served := make(chan error, 1)
 	a.Lifecycle().SetOnStarted(func() {
 		close(started)
-		keydown, unregister, err := register()
-		if err != nil {
-			served <- err
-			a.Quit()
-			return
-		}
-		fmt.Println("Daemon running. Press Ctrl+Shift+P to open the password manager.")
 		go func() {
-			err := serveHotkey(ctx, keydown, func() { fyne.Do(show) })
-			if unregErr := unregister(); unregErr != nil {
-				err = errors.Join(err, fmt.Errorf("unregister hotkey Ctrl+Shift+P: %w", unregErr))
-			}
-			served <- err
+			served <- registerAndServe(ctx, show, register)
 			a.Quit()
 		}()
 	})
@@ -183,6 +174,21 @@ func runApp(ctx context.Context, a fyne.App, show func(), register hotkeyRegistr
 	default:
 		return clearClipboardOnShutdown()
 	}
+}
+
+// registerAndServe registers the hotkey, serves it until ctx is cancelled or
+// its events stop, then unregisters it. It must not run on the main thread.
+func registerAndServe(ctx context.Context, show func(), register hotkeyRegistrar) error {
+	keydown, unregister, err := register()
+	if err != nil {
+		return err
+	}
+	fmt.Println("Daemon running. Press Ctrl+Shift+P to open the password manager.")
+	err = serveHotkey(ctx, keydown, func() { fyne.Do(show) })
+	if unregErr := unregister(); unregErr != nil {
+		err = errors.Join(err, fmt.Errorf("unregister hotkey Ctrl+Shift+P: %w", unregErr))
+	}
+	return err
 }
 
 // serveHotkey calls onPress for each keydown event until ctx is cancelled
