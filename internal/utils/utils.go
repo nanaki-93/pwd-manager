@@ -701,17 +701,16 @@ func requireStoreFile() error {
 	return err
 }
 
-// GetPwdObjAfterCheckMaster prompts for the master password on stdin and
-// unlocks the store, exiting the process on a missing store or a read failure.
+// GetPwdObjAfterCheckMaster unlocks the store with Touch ID when enabled, or
+// else with the master password prompted on stdin, exiting the process on a
+// missing store or a read failure.
 func GetPwdObjAfterCheckMaster() (model.PwdFile, error) {
 	if err := requireStoreFile(); err != nil {
 		ManageErrorAndExit(err)
 		return model.PwdFile{}, err
 	}
-	pwd := PromptPassword("Enter your master password:")
-	// SetMasterKey keeps its own copy; the prompted buffer is wiped on return.
-	defer wipeBytes(pwd)
-	pwdObj, err := unlockWithPassword(pwd)
+	prompt := func() []byte { return PromptPassword("Enter your master password:") }
+	pwdObj, err := unlockSecret(systemBiometrics(), prompt, os.Stderr)
 	var readErr storeReadError
 	if errors.As(err, &readErr) {
 		ManageErrorAndExit(readErr.err)

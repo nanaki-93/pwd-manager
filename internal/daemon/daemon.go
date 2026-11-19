@@ -199,7 +199,7 @@ func askSecretGUI(prompt string) (string, error) {
 }
 
 func showPasswordsMenu() {
-	pwdObj, err := unlockStoreGUI(askSecretGUI)
+	pwdObj, err := unlockStoreGUI(utils.UnlockStoreBiometric, askSecretGUI)
 	if err != nil {
 		reportMenuError(err)
 		return
@@ -246,9 +246,14 @@ func reportMenuError(err error) {
 	zenity.Error(err.Error(), zenity.Title("Error"))
 }
 
-// unlockStoreGUI asks for the master password with ask and unlocks the store,
-// returning every failure as an error so the daemon keeps running.
-func unlockStoreGUI(ask askSecretFunc) (model.PwdFile, error) {
+// unlockStoreGUI unlocks the store with Touch ID through unlockBiometric and,
+// when that is unavailable, asks for the master password with ask, returning
+// every failure as an error so the daemon keeps running.
+func unlockStoreGUI(unlockBiometric func() (model.PwdFile, error), ask askSecretFunc) (model.PwdFile, error) {
+	pwdObj, err := unlockBiometric()
+	if !errors.Is(err, utils.ErrBiometricUnavailable) {
+		return pwdObj, err
+	}
 	master, err := ask(masterPrompt)
 	if err != nil {
 		return model.PwdFile{}, fmt.Errorf("read master password: %w", err)

@@ -184,6 +184,12 @@ func savePassword(currPwdContent model.PwdFile) {
 	}
 	currPwdContent.MasterPassword = hashedPassword
 	err = rotateMasterKey(newPassword, currPwdContent)
+	if err == nil {
+		// The store is already saved, so a failed refresh only warns.
+		if refreshErr := utils.RefreshBiometricSecret(newPassword); refreshErr != nil {
+			fmt.Fprintf(os.Stderr, "Warning: %v\n", refreshErr)
+		}
+	}
 	clear(newPassword)
 	if err != nil {
 		utils.ManageErrorAndExit(err)
