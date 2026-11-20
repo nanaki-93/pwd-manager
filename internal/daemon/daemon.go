@@ -130,6 +130,7 @@ func Start(ctx context.Context) error {
 	}
 	ctx, stop := signal.NotifyContext(ctx, syscall.SIGTERM, os.Interrupt, syscall.SIGHUP)
 	defer stop()
+	beforeAppStart()
 	a := app.NewWithID(appID)
 	win := ui.New(a, newStoreVault())
 	return runApp(ctx, a, win.Show, registerHotkey)
@@ -150,6 +151,11 @@ func registerHotkey() (<-chan hotkey.Event, func() error, error) {
 // hideFromDock turns the started app into a background (Dock-less) app. It
 // must run on the main thread; tests replace it to avoid touching the OS.
 var hideFromDock = setBackgroundActivationPolicy
+
+// beforeAppStart prepares the windowing backend before the app is created so
+// that hideFromDock is not undone at launch; tests replace it to avoid
+// touching the OS.
+var beforeAppStart = disableRegularActivationPolicy
 
 // runApp runs a until ctx is cancelled, the hotkey events stop or a quits.
 // Once a has started, it hides a from the Dock and a goroutine registers the hotkey off the main thread

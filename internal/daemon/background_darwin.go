@@ -22,6 +22,16 @@ static void setAccessoryActivationPolicy(void) {
 */
 import "C"
 
+import "github.com/go-gl/glfw/v3.3/glfw"
+
+// disableRegularActivationPolicy stops GLFW's Cocoa menubar setup, which on
+// launch switches a non-bundled app back to the Regular activation policy and
+// so restores the Dock icon hideFromDock removed. It must run before
+// glfw.Init, that is before the Fyne app is created.
+func disableRegularActivationPolicy() {
+	glfw.InitHint(glfw.CocoaMenubar, glfw.False)
+}
+
 // setBackgroundActivationPolicy hides the app from the Dock by switching
 // NSApp to the Accessory activation policy. It must run on the main thread.
 func setBackgroundActivationPolicy() {

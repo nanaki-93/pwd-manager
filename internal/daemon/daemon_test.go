@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"context"
 	"errors"
 	"reflect"
 	"strings"
@@ -9,6 +10,26 @@ import (
 
 	"github.com/nanaki-93/pwd-manager/internal/model"
 )
+
+func TestStartCallsBeforeAppStart(t *testing.T) {
+	old := beforeAppStart
+	t.Cleanup(func() { beforeAppStart = old })
+	sentinel := new(int)
+	calls := 0
+	beforeAppStart = func() {
+		calls++
+		panic(sentinel)
+	}
+	defer func() {
+		if got := recover(); got != sentinel {
+			t.Errorf("Start panic = %v, want hook sentinel", got)
+		}
+		if calls != 1 {
+			t.Errorf("beforeAppStart calls = %d, want 1", calls)
+		}
+	}()
+	_ = Start(context.Background())
+}
 
 func TestUpdateSavedPassword(t *testing.T) {
 	saveErr := errors.New("save failed")
