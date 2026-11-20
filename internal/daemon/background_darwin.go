@@ -9,7 +9,8 @@ package daemon
 
 // setAccessoryActivationPolicy makes the running app an accessory app: no
 // Dock icon and no menu bar, while its windows can still be shown. It then
-// activates the app so a shown accessory window still takes focus.
+// activates the app and orders each visible window in front of other apps,
+// keeping its normal window level, so a shown accessory window takes focus.
 static void setAccessoryActivationPolicy(void) {
 	@autoreleasepool {
 		[NSApp setActivationPolicy:NSApplicationActivationPolicyAccessory];
@@ -17,6 +18,12 @@ static void setAccessoryActivationPolicy(void) {
 #pragma clang diagnostic ignored "-Wdeprecated-declarations"
 		[NSApp activateIgnoringOtherApps:YES];
 #pragma clang diagnostic pop
+		for (NSWindow *window in [NSApp windows]) {
+			if ([window isVisible]) {
+				[window makeKeyAndOrderFront:nil];
+				[window orderFrontRegardless];
+			}
+		}
 	}
 }
 */
