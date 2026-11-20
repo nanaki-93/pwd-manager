@@ -105,7 +105,11 @@ func (w *Window) unlockBiometric(session uint64) {
 			w.status.SetText(err.Error())
 		case unlocked:
 			w.showList("")
+		default:
+			return
 		}
+		// The Touch ID and Keychain prompts took focus; bring the window back.
+		w.win.RequestFocus()
 	})
 }
 
