@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"fyne.io/fyne/v2"
+	"fyne.io/fyne/v2/test"
 	"golang.design/x/hotkey"
 )
 
@@ -123,6 +124,47 @@ func TestRunAppHidesDockBeforeRegisteringHotkey(t *testing.T) {
 	case <-hidden:
 	default:
 		t.Fatal("Dock was not hidden on startup")
+	}
+}
+
+func TestRegisterAndServeHidesDockAfterEveryShow(t *testing.T) {
+	a := test.NewApp()
+	defer a.Quit()
+	old := hideFromDock
+	defer func() { hideFromDock = old }()
+	calls := make(chan string, 4)
+	hideFromDock = func() { calls <- "hide" }
+	events := make(chan hotkey.Event)
+	register := func() (<-chan hotkey.Event, func() error, error) {
+		return events, func() error { return nil }, nil
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- registerAndServe(ctx, func() { calls <- "show" }, register) }()
+	defer func() {
+		cancel()
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			t.Error("hotkey server did not stop")
+		}
+	}()
+	for i := 0; i < 2; i++ {
+		select {
+		case events <- hotkey.Event{}:
+		case <-time.After(5 * time.Second):
+			t.Fatal("hotkey event was not accepted")
+		}
+		for _, want := range []string{"show", "hide"} {
+			select {
+			case got := <-calls:
+				if got != want {
+					t.Fatalf("press %d: got %q, want %q", i+1, got, want)
+				}
+			case <-time.After(5 * time.Second):
+				t.Fatalf("press %d: timed out waiting for %s", i+1, want)
+			}
+		}
 	}
 }
 

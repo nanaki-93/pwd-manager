@@ -155,7 +155,8 @@ var hideFromDock = setBackgroundActivationPolicy
 // Once a has started, it hides a from the Dock and a goroutine registers the hotkey off the main thread
 // (on macOS, Register and Unregister dispatch_sync to the main queue, which
 // traps when called from it), serves it by calling show on the main thread
-// for each press, unregisters it and quits a when it stops. After a returns,
+// and hiding a from the Dock again for each press, unregisters it and quits a
+// when it stops. After a returns,
 // runApp stops that goroutine, which clears a pending clipboard password,
 // and returns its error.
 func runApp(ctx context.Context, a fyne.App, show func(), register hotkeyRegistrar) error {
@@ -189,7 +190,14 @@ func registerAndServe(ctx context.Context, show func(), register hotkeyRegistrar
 		return err
 	}
 	fmt.Println("Daemon running. Press Ctrl+Shift+P to open the password manager.")
-	err = serveHotkey(ctx, keydown, func() { fyne.Do(show) })
+	// Showing the window can create the GLFW window lazily, whose AppKit
+	// setup restores the Regular policy and the Dock icon, so hide it again.
+	err = serveHotkey(ctx, keydown, func() {
+		fyne.Do(func() {
+			show()
+			hideFromDock()
+		})
+	})
 	if unregErr := unregister(); unregErr != nil {
 		err = errors.Join(err, fmt.Errorf("unregister hotkey Ctrl+Shift+P: %w", unregErr))
 	}
