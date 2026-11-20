@@ -1,10 +1,52 @@
 package cmd
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"path/filepath"
+	"reflect"
+	"strings"
 	"testing"
 )
+
+func TestDaemonDetachForwardsFlagsWithoutStartingDaemon(t *testing.T) {
+	oldSpawn, oldStart := spawnDetached, startDaemon
+	oldDetach, oldRestart, oldConfig := detachDaemon, restartDaemon, cfgFile
+	t.Cleanup(func() {
+		spawnDetached, startDaemon = oldSpawn, oldStart
+		detachDaemon, restartDaemon, cfgFile = oldDetach, oldRestart, oldConfig
+		daemonCmd.SetOut(nil)
+	})
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	detachDaemon, restartDaemon, cfgFile = true, true, "config with spaces.toml"
+	var args []string
+	var logPath string
+	spawnDetached = func(a []string, path string) (int, error) {
+		args, logPath = a, path
+		return 12345, nil
+	}
+	startDaemon = func(context.Context) error { t.Error("started daemon in parent"); return nil }
+	var out bytes.Buffer
+	daemonCmd.SetOut(&out)
+	if err := daemonCmd.RunE(daemonCmd, nil); err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"daemon", "--restart", "--config", cfgFile}
+	if !reflect.DeepEqual(args, want) {
+		t.Errorf("child args = %q, want %q", args, want)
+	}
+	pidPath, err := daemonPidfilePath()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if logPath != filepath.Join(filepath.Dir(pidPath), "daemon.log") {
+		t.Errorf("log path = %q", logPath)
+	}
+	if !strings.Contains(out.String(), "12345") || !strings.Contains(out.String(), logPath) {
+		t.Errorf("notice = %q", out.String())
+	}
+}
 
 type daemonCtxKey struct{}
 

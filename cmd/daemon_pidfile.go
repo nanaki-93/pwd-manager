@@ -31,6 +31,12 @@ func daemonPidfilePath() (string, error) {
 	return filepath.Join(dir, "pwd-manager", "daemon.pid"), nil
 }
 
+// daemonLogPath returns where a detached daemon writes its output: next to
+// the pidfile at pidPath.
+func daemonLogPath(pidPath string) string {
+	return filepath.Join(filepath.Dir(pidPath), "daemon.log")
+}
+
 // readPidfile returns the pid recorded at path, or 0 when no pidfile exists.
 func readPidfile(path string) (int, error) {
 	data, err := os.ReadFile(path)

@@ -147,8 +147,12 @@ func registerHotkey() (<-chan hotkey.Event, func() error, error) {
 	return hk.Keydown(), hk.Unregister, nil
 }
 
+// hideFromDock turns the started app into a background (Dock-less) app. It
+// must run on the main thread; tests replace it to avoid touching the OS.
+var hideFromDock = setBackgroundActivationPolicy
+
 // runApp runs a until ctx is cancelled, the hotkey events stop or a quits.
-// Once a has started, a goroutine registers the hotkey off the main thread
+// Once a has started, it hides a from the Dock and a goroutine registers the hotkey off the main thread
 // (on macOS, Register and Unregister dispatch_sync to the main queue, which
 // traps when called from it), serves it by calling show on the main thread
 // for each press, unregisters it and quits a when it stops. After a returns,
@@ -160,6 +164,7 @@ func runApp(ctx context.Context, a fyne.App, show func(), register hotkeyRegistr
 	started := make(chan struct{})
 	served := make(chan error, 1)
 	a.Lifecycle().SetOnStarted(func() {
+		hideFromDock()
 		close(started)
 		go func() {
 			served <- registerAndServe(ctx, show, register)

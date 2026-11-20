@@ -100,6 +100,32 @@ func TestRunAppHotkeyLifecycleAndErrors(t *testing.T) {
 	}
 }
 
+func TestRunAppHidesDockBeforeRegisteringHotkey(t *testing.T) {
+	old := hideFromDock
+	t.Cleanup(func() { hideFromDock = old })
+	a := &lifecycleApp{ready: make(chan struct{}), quit: make(chan struct{})}
+	hidden := make(chan struct{})
+	hideFromDock = func() { close(hidden) }
+	register := func() (<-chan hotkey.Event, func() error, error) {
+		select {
+		case <-hidden:
+		default:
+			return nil, nil, errors.New("hotkey registered before hiding Dock")
+		}
+		events := make(chan hotkey.Event)
+		close(events)
+		return events, func() error { return nil }, nil
+	}
+	if err := runApp(context.Background(), a, func() {}, register); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-hidden:
+	default:
+		t.Fatal("Dock was not hidden on startup")
+	}
+}
+
 func TestStartReturnsWhenContextAlreadyCancelled(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
