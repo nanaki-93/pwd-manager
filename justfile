@@ -29,9 +29,10 @@ check:
     go vet ./...
     go test -race ./...
 
-# Build pwd-manager, replace the installed binary and restart its daemon (override dir with INSTALL_DIR)
+# Build pwd-manager, replace the installed binary, start its daemon at login on macOS and restart it (override dir with INSTALL_DIR)
 install:
     mkdir -p "{{install_dir}}"
     go build -o "{{install_dir}}/.pwd-manager.tmp" .
     mv -f "{{install_dir}}/.pwd-manager.tmp" "{{install_dir}}/pwd-manager"
+    if [ "$(uname -s)" = Darwin ]; then "{{install_dir}}/pwd-manager" autostart enable; fi
     nohup "{{install_dir}}/pwd-manager" daemon --restart >"{{install_dir}}/daemon.log" 2>&1 &

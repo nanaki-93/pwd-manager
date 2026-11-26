@@ -12,12 +12,18 @@ A local command-line password manager written in Go. Passwords are encrypted on 
 | `pwd-manager list` | List saved passwords (`--json` supported) |
 | `pwd-manager remove <name>` | Delete a saved password |
 | `pwd-manager daemon` | Start the background service for hotkey access |
+| `pwd-manager autostart enable` | Start the daemon automatically at login (macOS) |
+| `pwd-manager autostart disable` | Stop starting the daemon at login |
 | `pwd-manager touchid enable` | Unlock with Touch ID instead of typing the master password (macOS) |
 | `pwd-manager touchid disable` | Stop using Touch ID and remove the saved master password |
 
 ## Password window
 
 While `pwd-manager daemon` runs, Ctrl+Shift+P opens the password window. Unlock it with Touch ID (when enabled) or your master password. Then you can copy, edit, add or delete passwords. Copied passwords are cleared from the clipboard automatically. Type in the search field to filter the list. Closing the window, pressing Lock or leaving it idle for two minutes locks the store again.
+
+## Start at login (macOS)
+
+`pwd-manager autostart enable` writes the LaunchAgent `~/Library/LaunchAgents/io.github.nanaki-93.pwd-manager.daemon.plist`. It runs `pwd-manager daemon --restart` each time you log in, so the hotkey works again after a reboot. The daemon's output goes to `~/Library/Caches/pwd-manager/daemon.log`. Enabling doesn't start the daemon right away; use `pwd-manager daemon --detach` for that. `just install` enables autostart for the installed binary on macOS. `pwd-manager autostart disable` removes the LaunchAgent and leaves a running daemon alone. The LaunchAgent stores the binary's absolute path, so run `autostart enable` again if you move the binary.
 
 ## Touch ID (macOS)
 

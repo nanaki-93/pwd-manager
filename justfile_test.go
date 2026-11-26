@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -53,6 +54,22 @@ func checkDaemonArgs(t *testing.T, path string, failed bool) {
 	}
 }
 
+// checkAutostartArgs checks that a successful install on macOS enabled
+// starting the daemon at login, and that other installs did not.
+func checkAutostartArgs(t *testing.T, path string, failed bool) {
+	t.Helper()
+	args, err := os.ReadFile(path)
+	if !failed && runtime.GOOS == "darwin" {
+		if err != nil || string(args) != "autostart enable\n" {
+			t.Fatalf("autostart arguments = %q, %v; want autostart enabled", args, err)
+		}
+		return
+	}
+	if !os.IsNotExist(err) {
+		t.Fatalf("autostart ran (args %q, err %v) after failed build %v on %s", args, err, failed, runtime.GOOS)
+	}
+}
+
 func TestJustInstallReplacesBinaryOnlyAfterSuccessfulBuild(t *testing.T) {
 	just, err := exec.LookPath("just")
 	if err != nil {
@@ -81,7 +98,7 @@ func TestJustInstallReplacesBinaryOnlyAfterSuccessfulBuild(t *testing.T) {
 				t.Fatal(err)
 			}
 			bin := t.TempDir()
-			stub := "#!/bin/sh\n[ \"$1\" = build ] && [ \"$2\" = -o ] && [ \"$4\" = . ] || exit 2\nprintf '#!/bin/sh\\nprintf \"%%s\\\\n\" \"$*\" > \"$HOME/daemon-args\"\\n' > \"$3\"\nchmod +x \"$3\"\n[ \"$FAIL_BUILD\" != 1 ]\n"
+			stub := "#!/bin/sh\n[ \"$1\" = build ] && [ \"$2\" = -o ] && [ \"$4\" = . ] || exit 2\nprintf '#!/bin/sh\\nprintf \"%%s\\\\n\" \"$*\" > \"$HOME/$1-args\"\\n' > \"$3\"\nchmod +x \"$3\"\n[ \"$FAIL_BUILD\" != 1 ]\n"
 			if err := os.WriteFile(filepath.Join(bin, "go"), []byte(stub), 0o755); err != nil {
 				t.Fatal(err)
 			}
