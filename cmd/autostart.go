@@ -2,54 +2,48 @@ package cmd
 
 import (
 	"bytes"
-	"context"
 	"encoding/xml"
 	"errors"
 	"fmt"
 	"io"
 	"io/fs"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"runtime"
-	"strconv"
-	"strings"
 
 	"github.com/spf13/cobra"
 )
 
-// launchAgentLabel identifies the login item to launchd. It matches the
-// label of earlier hand-written plists, so enabling replaces them.
-const launchAgentLabel = "com.github.nanaki.pwd-manager"
+// launchAgentLabel names the LaunchAgent that starts the daemon at login.
+const launchAgentLabel = "io.github.nanaki-93.pwd-manager.daemon"
 
-// launchctlNotLoadedExit is the launchctl exit status ("No such process")
-// of bootout for a service that is not loaded.
-const launchctlNotLoadedExit = 3
+// autostartGOOS is the platform autostart runs on; tests replace it.
+var autostartGOOS = runtime.GOOS
+
+// autostartExecutable returns the absolute path of the binary the
+// LaunchAgent runs; tests replace it.
+var autostartExecutable = resolvedExecutable
 
 var autostartCmd = &cobra.Command{
 	Use:   "autostart",
-	Short: "start the daemon automatically at login (macOS)",
-	Long: "Start the daemon automatically at login (macOS).\n\n" +
-		"`autostart enable` writes the LaunchAgent ~/Library/LaunchAgents/" + launchAgentLabel + ".plist, " +
-		"which runs `daemon --restart` from this binary's current path at every login and restarts it if it crashes, " +
-		"then loads it, which starts the daemon now. Run it again after moving the binary. " +
-		"`autostart disable` unloads and removes the LaunchAgent, which stops a daemon it started.",
+	Short: "start the daemon automatically when you log in (macOS)",
+	Long: "Start the hotkey daemon automatically when you log in.\n\n" +
+		"`autostart enable` writes a LaunchAgent to ~/Library/LaunchAgents/" + launchAgentLabel + ".plist " +
+		"that runs `pwd-manager daemon --restart` at login, writing its output to daemon.log in the user cache dir. " +
+		"It does not start the daemon now; run `pwd-manager daemon --detach` for that. " +
+		"`autostart disable` removes the LaunchAgent; a running daemon keeps running.",
 }
 
 var autostartEnableCmd = &cobra.Command{
 	Use:   "enable",
-	Short: "start the daemon at login from this binary",
+	Short: "start the daemon at login",
 	Args:  cobra.NoArgs,
 	RunE: func(cmd *cobra.Command, args []string) error {
-		ctx, err := autostartContext(cmd)
+		path, err := enableAutostart()
 		if err != nil {
 			return err
 		}
-		path, err := enableAutostart(ctx)
-		if err != nil {
-			return err
-		}
-		return writeNotice(cmd.OutOrStdout(), "Daemon autostart enabled: %s\n", path)
+		return printAutostartNotice(cmd.OutOrStdout(), "Daemon will start at login (LaunchAgent %s)\n", path)
 	},
 }
 
@@ -58,43 +52,27 @@ var autostartDisableCmd = &cobra.Command{
 	Short: "stop starting the daemon at login",
 	Args:  cobra.NoArgs,
 	RunE: func(cmd *cobra.Command, args []string) error {
-		ctx, err := autostartContext(cmd)
+		path, err := disableAutostart()
 		if err != nil {
 			return err
 		}
-		if err := disableAutostart(ctx); err != nil {
-			return err
-		}
-		return writeNotice(cmd.OutOrStdout(), "Daemon autostart disabled\n")
+		return printAutostartNotice(cmd.OutOrStdout(), "Daemon will no longer start at login (removed %s)\n", path)
 	},
 }
 
-// autostartGOOS, launchAgentsDir, autostartExecutable and runLaunchctl are
-// replaced by tests to avoid touching the real login items.
-var (
-	autostartGOOS       = runtime.GOOS
-	launchAgentsDir     = defaultLaunchAgentsDir
-	autostartExecutable = resolvedExecutable
-	runLaunchctl        = execLaunchctl
-)
-
-// autostartContext checks the platform before any side effect and returns
-// the command context.
-func autostartContext(cmd *cobra.Command) (context.Context, error) {
-	if autostartGOOS != "darwin" {
-		return nil, fmt.Errorf("autostart is only supported on macOS, not %s", autostartGOOS)
+func printAutostartNotice(out io.Writer, format, path string) error {
+	if _, err := fmt.Fprintf(out, format, path); err != nil {
+		return fmt.Errorf("write autostart notice: %w", err)
 	}
-	ctx := cmd.Context()
-	if ctx == nil {
-		ctx = context.Background()
-	}
-	return ctx, nil
+	return nil
 }
 
-// enableAutostart writes the LaunchAgent for this executable and reloads it,
-// so a stale agent loaded from an older plist is replaced. It returns the
-// plist path.
-func enableAutostart(ctx context.Context) (string, error) {
+// enableAutostart writes the daemon LaunchAgent and returns its path.
+func enableAutostart() (string, error) {
+	path, err := launchAgentPath()
+	if err != nil {
+		return "", err
+	}
 	exe, err := autostartExecutable()
 	if err != nil {
 		return "", fmt.Errorf("enable autostart: %w", err)
@@ -103,160 +81,102 @@ func enableAutostart(ctx context.Context) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("enable autostart: locate daemon pidfile: %w", err)
 	}
-	dir, err := launchAgentsDir()
-	if err != nil {
-		return "", fmt.Errorf("enable autostart: %w", err)
-	}
-	plistPath := filepath.Join(dir, launchAgentLabel+".plist")
-	args, err := autostartDaemonArgs()
-	if err != nil {
-		return "", fmt.Errorf("enable autostart: %w", err)
-	}
-	plist, err := launchAgentPlist(exe, args, daemonLogPath(pidPath))
-	if err != nil {
-		return "", fmt.Errorf("enable autostart: %w", err)
-	}
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return "", fmt.Errorf("enable autostart: create %s: %w", dir, err)
-	}
-	if err := os.MkdirAll(filepath.Dir(pidPath), 0o700); err != nil {
+	logPath := daemonLogPath(pidPath)
+	if err := os.MkdirAll(filepath.Dir(logPath), 0o700); err != nil {
 		return "", fmt.Errorf("enable autostart: create daemon log dir: %w", err)
 	}
-	if err := os.WriteFile(plistPath, plist, 0o644); err != nil {
-		return "", fmt.Errorf("enable autostart: write %s: %w", plistPath, err)
-	}
-	if err := bootoutLaunchAgent(ctx); err != nil {
-		return "", fmt.Errorf("enable autostart: %w", err)
-	}
-	if err := runLaunchctl(ctx, "bootstrap", launchDomain(), plistPath); err != nil {
-		return "", fmt.Errorf("enable autostart: load %s: %w", plistPath, err)
-	}
-	return plistPath, nil
-}
-
-// disableAutostart unloads the LaunchAgent and removes its plist; either may
-// already be gone.
-func disableAutostart(ctx context.Context) error {
-	dir, err := launchAgentsDir()
+	args, err := autostartDaemonArgs()
 	if err != nil {
-		return fmt.Errorf("disable autostart: %w", err)
+		return "", err
 	}
-	if err := bootoutLaunchAgent(ctx); err != nil {
-		return fmt.Errorf("disable autostart: %w", err)
+	plist := launchAgentPlist(exe, args, logPath)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return "", fmt.Errorf("enable autostart: create LaunchAgents dir: %w", err)
 	}
-	plistPath := filepath.Join(dir, launchAgentLabel+".plist")
-	if err := os.Remove(plistPath); err != nil && !errors.Is(err, fs.ErrNotExist) {
-		return fmt.Errorf("disable autostart: remove %s: %w", plistPath, err)
+	if err := os.WriteFile(path, plist, 0o644); err != nil {
+		return "", fmt.Errorf("enable autostart: write %s: %w", path, err)
 	}
-	return nil
+	return path, nil
 }
 
-// autostartDaemonArgs returns the daemon arguments launchd runs: --restart
-// stops a daemon started by hand, and --config keeps this process's config
-// as an absolute path, since launchd runs the daemon from /.
+// autostartDaemonArgs returns `daemon --restart`, plus --config with an
+// absolute path when one was given, since launchd runs it from /.
 func autostartDaemonArgs() ([]string, error) {
 	args := []string{"daemon", "--restart"}
 	if cfgFile == "" {
 		return args, nil
 	}
-	cfg, err := filepath.Abs(cfgFile)
+	abs, err := filepath.Abs(cfgFile)
 	if err != nil {
-		return nil, fmt.Errorf("resolve config path %s: %w", cfgFile, err)
+		return nil, fmt.Errorf("enable autostart: resolve config path %s: %w", cfgFile, err)
 	}
-	return append(args, "--config", cfg), nil
+	return append(args, "--config", abs), nil
 }
 
-// launchAgentPlist renders a LaunchAgent that runs exe with args at login,
-// restarts it only after a failed exit (a stopped daemon exits cleanly and
-// stays stopped) and appends its output to logPath.
-func launchAgentPlist(exe string, args []string, logPath string) ([]byte, error) {
+// disableAutostart removes the daemon LaunchAgent, if present, and returns
+// its path.
+func disableAutostart() (string, error) {
+	path, err := launchAgentPath()
+	if err != nil {
+		return "", err
+	}
+	if err := os.Remove(path); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return "", fmt.Errorf("disable autostart: remove %s: %w", path, err)
+	}
+	return path, nil
+}
+
+// launchAgentPath returns where the daemon LaunchAgent lives. Only macOS has
+// LaunchAgents, so other platforms get an error.
+func launchAgentPath() (string, error) {
+	if autostartGOOS != "darwin" {
+		return "", fmt.Errorf("autostart is not supported on %s", autostartGOOS)
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", fmt.Errorf("locate home dir: %w", err)
+	}
+	return filepath.Join(home, "Library", "LaunchAgents", launchAgentLabel+".plist"), nil
+}
+
+// launchAgentPlist renders a LaunchAgent that runs exe with args once per
+// login, in the GUI session the hotkey and window need, appending its output
+// to logPath. It is not kept alive, so `daemon --restart` can replace it.
+func launchAgentPlist(exe string, args []string, logPath string) []byte {
 	var b bytes.Buffer
 	b.WriteString(`<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-	<key>Label</key>
-	<string>` + launchAgentLabel + `</string>
-	<key>ProgramArguments</key>
-	<array>
 `)
+	plistString(&b, "Label", launchAgentLabel)
+	b.WriteString("\t<key>ProgramArguments</key>\n\t<array>\n")
 	for _, arg := range append([]string{exe}, args...) {
-		if err := writePlistString(&b, "\t\t", arg); err != nil {
-			return nil, err
-		}
+		b.WriteString("\t\t<string>" + xmlEscape(arg) + "</string>\n")
 	}
-	b.WriteString(`	</array>
-	<key>RunAtLoad</key>
-	<true/>
-	<key>KeepAlive</key>
-	<dict>
-		<key>SuccessfulExit</key>
-		<false/>
-	</dict>
-	<key>ProcessType</key>
-	<string>Interactive</string>
-	<key>StandardOutPath</key>
-`)
-	if err := writePlistString(&b, "\t", logPath); err != nil {
-		return nil, err
-	}
-	b.WriteString("\t<key>StandardErrorPath</key>\n")
-	if err := writePlistString(&b, "\t", logPath); err != nil {
-		return nil, err
-	}
+	b.WriteString("\t</array>\n")
+	b.WriteString("\t<key>RunAtLoad</key>\n\t<true/>\n")
+	plistString(&b, "LimitLoadToSessionType", "Aqua")
+	plistString(&b, "ProcessType", "Interactive")
+	plistString(&b, "StandardOutPath", logPath)
+	plistString(&b, "StandardErrorPath", logPath)
 	b.WriteString("</dict>\n</plist>\n")
-	return b.Bytes(), nil
+	return b.Bytes()
 }
 
-// writePlistString writes value as an XML-escaped plist string element.
-func writePlistString(b *bytes.Buffer, indent, value string) error {
-	b.WriteString(indent + "<string>")
-	if err := xml.EscapeText(b, []byte(value)); err != nil {
-		return fmt.Errorf("encode plist string %q: %w", value, err)
-	}
-	b.WriteString("</string>\n")
-	return nil
+func plistString(b *bytes.Buffer, key, value string) {
+	b.WriteString("\t<key>" + xmlEscape(key) + "</key>\n\t<string>" + xmlEscape(value) + "</string>\n")
 }
 
-// bootoutLaunchAgent unloads the LaunchAgent, which stops a daemon it runs.
-// An agent that is not loaded is left alone.
-func bootoutLaunchAgent(ctx context.Context) error {
-	err := runLaunchctl(ctx, "bootout", launchDomain()+"/"+launchAgentLabel)
-	var exitErr *exec.ExitError
-	if errors.As(err, &exitErr) && exitErr.ExitCode() == launchctlNotLoadedExit {
-		return nil
-	}
-	if err != nil {
-		return fmt.Errorf("unload %s: %w", launchAgentLabel, err)
-	}
-	return nil
+func xmlEscape(s string) string {
+	var b bytes.Buffer
+	// EscapeText only fails when the writer does; bytes.Buffer never does.
+	_ = xml.EscapeText(&b, []byte(s))
+	return b.String()
 }
 
-// launchDomain is the launchd domain of the logged-in user's GUI session,
-// where agents can open windows and register hotkeys.
-func launchDomain() string {
-	return "gui/" + strconv.Itoa(os.Getuid())
-}
-
-// execLaunchctl runs launchctl with args, including its output in the error.
-func execLaunchctl(ctx context.Context, args ...string) error {
-	out, err := exec.CommandContext(ctx, "launchctl", args...).CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("launchctl %s: %w: %s", strings.Join(args, " "), err, strings.TrimSpace(string(out)))
-	}
-	return nil
-}
-
-func defaultLaunchAgentsDir() (string, error) {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return "", fmt.Errorf("locate home dir: %w", err)
-	}
-	return filepath.Join(home, "Library", "LaunchAgents"), nil
-}
-
-// resolvedExecutable returns the absolute path of the running binary with
-// symlinks resolved, so the LaunchAgent does not depend on the shell's PATH.
+// resolvedExecutable returns the running binary's absolute path with
+// symlinks resolved, so the LaunchAgent keeps working from any shell.
 func resolvedExecutable() (string, error) {
 	exe, err := os.Executable()
 	if err != nil {
@@ -267,14 +187,6 @@ func resolvedExecutable() (string, error) {
 		return "", fmt.Errorf("resolve executable %s: %w", exe, err)
 	}
 	return resolved, nil
-}
-
-// writeNotice writes a formatted confirmation to out.
-func writeNotice(out io.Writer, format string, args ...any) error {
-	if _, err := fmt.Fprintf(out, format, args...); err != nil {
-		return fmt.Errorf("write autostart notice: %w", err)
-	}
-	return nil
 }
 
 func init() {
