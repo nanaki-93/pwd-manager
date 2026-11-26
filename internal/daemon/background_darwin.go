@@ -9,8 +9,10 @@ package daemon
 
 // setAccessoryActivationPolicy makes the running app an accessory app: no
 // Dock icon and no menu bar, while its windows can still be shown. It then
-// activates the app and orders each visible window in front of other apps,
-// keeping its normal window level, so a shown accessory window takes focus.
+// activates the app and keeps each visible window always on top: it raises
+// the window to the floating level, above other apps' normal windows even
+// after they take focus, lets it join the active Space and full-screen apps,
+// and orders it in front so a shown accessory window takes focus.
 static void setAccessoryActivationPolicy(void) {
 	@autoreleasepool {
 		[NSApp setActivationPolicy:NSApplicationActivationPolicyAccessory];
@@ -20,6 +22,9 @@ static void setAccessoryActivationPolicy(void) {
 #pragma clang diagnostic pop
 		for (NSWindow *window in [NSApp windows]) {
 			if ([window isVisible]) {
+				[window setLevel:NSFloatingWindowLevel];
+				[window setCollectionBehavior:NSWindowCollectionBehaviorMoveToActiveSpace |
+					NSWindowCollectionBehaviorFullScreenAuxiliary];
 				[window makeKeyAndOrderFront:nil];
 				[window orderFrontRegardless];
 			}
@@ -40,7 +45,8 @@ func disableRegularActivationPolicy() {
 }
 
 // setBackgroundActivationPolicy hides the app from the Dock by switching
-// NSApp to the Accessory activation policy. It must run on the main thread.
+// NSApp to the Accessory activation policy and keeps its visible windows
+// always on top. It must run on the main thread.
 func setBackgroundActivationPolicy() {
 	C.setAccessoryActivationPolicy()
 }

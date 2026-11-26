@@ -12,7 +12,7 @@ import (
 
 // Compile the actual cgo helper with a fake NSApp: Go test files cannot import C,
 // and exercising real AppKit windows requires an interactive desktop session.
-func TestAccessoryPolicyRaisesOnlyVisibleWindows(t *testing.T) {
+func TestAccessoryPolicyKeepsOnlyVisibleWindowsOnTop(t *testing.T) {
 	source, err := os.ReadFile("background_darwin.go")
 	if err != nil {
 		t.Fatal(err)
@@ -27,18 +27,22 @@ func TestAccessoryPolicyRaisesOnlyVisibleWindows(t *testing.T) {
 #include <stdlib.h>
 @interface FakeWindow : NSObject
 @property BOOL visible;
-@property int keyCalls, frontCalls, levelCalls;
+@property int keyCalls, frontCalls, levelCalls, behaviorCalls;
+@property NSInteger level;
+@property NSWindowCollectionBehavior behavior;
 @property NSMutableString *events;
 - (BOOL)isVisible;
 - (void)makeKeyAndOrderFront:(id)sender;
 - (void)orderFrontRegardless;
 - (void)setLevel:(NSInteger)level;
+- (void)setCollectionBehavior:(NSWindowCollectionBehavior)behavior;
 @end
 @implementation FakeWindow
 - (BOOL)isVisible { return _visible; }
 - (void)makeKeyAndOrderFront:(id)sender { _keyCalls++; [_events appendString:@"K"]; }
 - (void)orderFrontRegardless { _frontCalls++; [_events appendString:@"F"]; }
-- (void)setLevel:(NSInteger)level { _levelCalls++; }
+- (void)setLevel:(NSInteger)level { _levelCalls++; _level = level; [_events appendString:@"L"]; }
+- (void)setCollectionBehavior:(NSWindowCollectionBehavior)behavior { _behaviorCalls++; _behavior = behavior; [_events appendString:@"B"]; }
 @end
 @interface FakeApp : NSObject
 @property NSArray *windows;
@@ -68,10 +72,15 @@ int main(void) {
         first.events = fakeApp.events; hidden.events = fakeApp.events; last.events = fakeApp.events;
         fakeApp.windows = @[first, hidden, last];
         setAccessoryActivationPolicy();
-        if (![fakeApp.events isEqualToString:@"PAPAKFKF"]) return 2;
+        if (![fakeApp.events isEqualToString:@"PAPALBKFLBKF"]) return 2;
         if (first.keyCalls != 1 || first.frontCalls != 1 || last.keyCalls != 1 || last.frontCalls != 1) return 3;
         if (hidden.keyCalls || hidden.frontCalls) return 4;
-        if (first.levelCalls || hidden.levelCalls || last.levelCalls) return 5;
+        if (hidden.levelCalls || hidden.behaviorCalls) return 5;
+        NSWindowCollectionBehavior want = NSWindowCollectionBehaviorMoveToActiveSpace | NSWindowCollectionBehaviorFullScreenAuxiliary;
+        for (FakeWindow *w in @[first, last]) {
+            if (w.levelCalls != 1 || w.level != NSFloatingWindowLevel) return 6;
+            if (w.behaviorCalls != 1 || w.behavior != want) return 7;
+        }
     }
     return 0;
 }
